@@ -2,8 +2,9 @@ import { ChevronLeft, ChevronRight, Download, Minus, Plus, RefreshCw } from "luc
 import { useEffect, useMemo, useState } from "react";
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { PDFDocumentProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
-import { api, type CompileJob } from "../../api";
+import { api, type CompileDiagnostic, type CompileJob } from "../../api";
 import { Button } from "../ui/button";
+import { CompileDiagnosticsPanel } from "./CompileDiagnosticsPanel";
 import { PdfPageCanvas } from "./PdfPageCanvas";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/legacy/build/pdf.worker.mjs", import.meta.url).toString();
@@ -13,13 +14,15 @@ export function PdfPreviewPane({
   compileJob,
   pdfNonce,
   onReload,
-  onSourceLocated
+  onSourceLocated,
+  onDiagnosticSelected
 }: {
   projectId: string;
   compileJob: CompileJob | null;
   pdfNonce: number;
   onReload: () => void;
   onSourceLocated: (location: { fileId: string; line: number; column: number }) => void;
+  onDiagnosticSelected: (diagnostic: CompileDiagnostic) => void;
 }) {
   const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
   const [loading, setLoading] = useState(false);
@@ -137,10 +140,11 @@ export function PdfPreviewPane({
       </div>
       {compileJob?.status === "success" ? (
         <div className="min-h-0 flex-1 overflow-auto p-4">
+          {compileJob.diagnostics.length > 0 && <CompileDiagnosticsPanel compileJob={compileJob} onDiagnosticSelected={onDiagnosticSelected} />}
           {loading && <div className="rounded-md border border-border bg-white p-4 text-sm text-muted-foreground">Loading PDF...</div>}
           {error && <div className="rounded-md bg-destructive p-4 text-sm text-destructive-foreground">{error}</div>}
           {document && !loading && (
-            <div className="mx-auto flex w-fit min-w-0 flex-col items-center">
+            <div className="mx-auto mt-4 flex w-fit min-w-0 flex-col items-center first:mt-0">
               <PdfPageCanvas document={document} pageNumber={visiblePage} scale={scale} onSourceRequest={(input) => void locateSource(input)} />
             </div>
           )}
@@ -151,9 +155,7 @@ export function PdfPreviewPane({
             Recompile the project to generate a PDF preview.
           </div>
           {compileJob?.status === "error" && (
-            <pre className="mt-4 overflow-auto rounded-md bg-slate-950 p-4 text-xs text-slate-100">
-              {compileJob.stderr || compileJob.stdout || "Compilation failed."}
-            </pre>
+            <CompileDiagnosticsPanel compileJob={compileJob} onDiagnosticSelected={onDiagnosticSelected} />
           )}
         </div>
       )}

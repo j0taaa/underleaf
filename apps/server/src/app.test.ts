@@ -292,6 +292,58 @@ describe("compile", () => {
     expect(response.json<{ stderr: string }>().stderr).toContain("used tectonic");
   });
 
+  it("extracts clickable diagnostics from compiler errors", async () => {
+    const fakeLatexmk = path.join(tmpDir, "fake-latexmk-error");
+    await fs.writeFile(
+      fakeLatexmk,
+      "#!/bin/sh\nprintf '%s\\n' './main.tex:7: Undefined control sequence.' 'l.7 \\\\brokencommand' >&2\nexit 1\n",
+      "utf8"
+    );
+    await fs.chmod(fakeLatexmk, 0o755);
+    config.latexmkBin = fakeLatexmk;
+
+    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Broken compile" } });
+    const project = projectResponse.json<{ id: string }>();
+
+    const response = await app.inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json<{ diagnostics: Array<{ severity: string; filePath: string; line: number; message: string }> }>().diagnostics).toEqual([
+      expect.objectContaining({
+        severity: "error",
+        filePath: "main.tex",
+        line: 7,
+        message: expect.stringContaining("Undefined control sequence")
+      })
+    ]);
+  });
+
+  it("stores warning diagnostics for successful compiles", async () => {
+    const fakeLatexmk = path.join(tmpDir, "fake-latexmk-warning");
+    await fs.writeFile(
+      fakeLatexmk,
+      "#!/bin/sh\nprintf '%s\\n' 'LaTeX Warning: Reference `missing` on page 1 undefined on input line 12.' >&2\nprintf '%s' fake-pdf > main.pdf\n",
+      "utf8"
+    );
+    await fs.chmod(fakeLatexmk, 0o755);
+    config.latexmkBin = fakeLatexmk;
+
+    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Warning compile" } });
+    const project = projectResponse.json<{ id: string }>();
+
+    const response = await app.inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<{ diagnostics: Array<{ severity: string; filePath: string; line: number; message: string }> }>().diagnostics).toEqual([
+      expect.objectContaining({
+        severity: "warning",
+        filePath: "main.tex",
+        line: 12,
+        message: expect.stringContaining("Reference")
+      })
+    ]);
+  });
+
   it("requests SyncTeX data and resolves PDF text back to source", async () => {
     const argsPath = path.join(tmpDir, "latexmk-args.txt");
     const fakeLatexmk = path.join(tmpDir, "fake-latexmk");

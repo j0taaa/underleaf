@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { nanoid } from "nanoid";
 import { type ServerConfig } from "./config.js";
-import { type CompileJobRow, type FileRow, type FolderRow, type UnderleafDb } from "./db.js";
+import { type CompileDiagnosticRow, type CompileJobRow, type FileRow, type FolderRow, type UnderleafDb } from "./db.js";
 import { ensureParentDir, normalizeProjectPath, projectFilePath, projectRoot } from "./paths.js";
 import { resolveTemplate, templates } from "./templates.js";
 
@@ -372,6 +372,7 @@ async function runCompile(db: UnderleafDb, config: ServerConfig, projectId: stri
     stderr: "",
     pdfPath: null,
     durationMs: null,
+    diagnostics: [],
     createdAt: now,
     updatedAt: now
   };
@@ -392,6 +393,7 @@ async function runCompile(db: UnderleafDb, config: ServerConfig, projectId: stri
     job.status = "error";
     job.stderr = error instanceof Error ? error.message : String(error);
   } finally {
+    job.diagnostics = parseCompileDiagnostics(`${job.stdout}\n${job.stderr}`, db.listFiles(projectId));
     job.durationMs = Date.now() - startedAt;
     job.updatedAt = new Date().toISOString();
     db.updateCompileJob(job);
@@ -432,6 +434,173 @@ async function spawnCompiler(config: ServerConfig, cwd: string): Promise<{ code:
 
 function isMissingCommandError(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+function parseCompileDiagnostics(output: string, files: FileRow[]): CompileDiagnosticRow[] {
+  const lines = output.replace(/\r\n/g, "\n").split("\n");
+  const diagnostics: CompileDiagnosticRow[] = [];
+  const knownPaths = new Set(files.map((file) => file.path));
+  const mainPath = knownPaths.has("main.tex") ? "main.tex" : files.find((file) => file.path.endsWith(".tex"))?.path ?? null;
+  const recentFiles: string[] = [];
+
+  const pushDiagnostic = (diagnostic: CompileDiagnosticRow) => {
+    const message = diagnostic.message.trim().replace(/\s+/g, " ");
+    if (!message) return;
+
+    const normalized: CompileDiagnosticRow = {
+      ...diagnostic,
+      filePath: diagnostic.filePath ? resolveDiagnosticFilePath(diagnostic.filePath, files) : mainPath,
+      line: Number.isFinite(diagnostic.line) && diagnostic.line && diagnostic.line > 0 ? diagnostic.line : null,
+      column: Number.isFinite(diagnostic.column) && diagnostic.column && diagnostic.column > 0 ? diagnostic.column : null,
+      message
+    };
+    const key = `${normalized.severity}|${normalized.filePath ?? ""}|${normalized.line ?? ""}|${normalized.message}`;
+    if (diagnostics.some((item) => `${item.severity}|${item.filePath ?? ""}|${item.line ?? ""}|${item.message}` === key)) return;
+    diagnostics.push(normalized);
+  };
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^error:\s+halted on potentially-recoverable error/i.test(line)) continue;
+
+    for (const match of line.matchAll(/(?:^|[(/ ])(\.?[A-Za-z0-9_.-][A-Za-z0-9_./ -]*\.tex)\b/g)) {
+      const filePath = resolveDiagnosticFilePath(match[1], files);
+      if (filePath && recentFiles[recentFiles.length - 1] !== filePath) recentFiles.push(filePath);
+      if (recentFiles.length > 8) recentFiles.shift();
+    }
+
+    const prefixedFileLine = line.match(/^(error|warning):\s+(.+?\.(?:tex|cls|sty|bib)):(\d+):\s*(.+)$/i);
+    if (prefixedFileLine) {
+      pushDiagnostic({
+        severity: prefixedFileLine[1].toLowerCase() === "warning" ? "warning" : "error",
+        filePath: prefixedFileLine[2],
+        line: Number(prefixedFileLine[3]),
+        column: null,
+        message: collectDiagnosticMessage(lines, index, prefixedFileLine[4]),
+        raw: line
+      });
+      continue;
+    }
+
+    const fileLineError = line.match(/^(.+?\.(?:tex|cls|sty|bib)):(\d+):\s*(.+)$/);
+    if (fileLineError) {
+      pushDiagnostic({
+        severity: "error",
+        filePath: fileLineError[1],
+        line: Number(fileLineError[2]),
+        column: null,
+        message: collectDiagnosticMessage(lines, index, fileLineError[3]),
+        raw: line
+      });
+      continue;
+    }
+
+    const latexError = line.match(/^!\s*(.+)$/);
+    if (latexError) {
+      const nearbyLine = findNearbyInputLine(lines, index);
+      pushDiagnostic({
+        severity: "error",
+        filePath: recentFiles[recentFiles.length - 1] ?? mainPath,
+        line: nearbyLine,
+        column: null,
+        message: collectDiagnosticMessage(lines, index, latexError[1]),
+        raw: line
+      });
+      continue;
+    }
+
+    const tectonicError = line.match(/^(?:error|fatal error):\s*(.+)$/i);
+    if (tectonicError) {
+      const location = findNearbyLocation(lines, index, files);
+      pushDiagnostic({
+        severity: "error",
+        filePath: location.filePath ?? recentFiles[recentFiles.length - 1] ?? mainPath,
+        line: location.line,
+        column: location.column,
+        message: tectonicError[1],
+        raw: line
+      });
+      continue;
+    }
+
+    const warning = line.match(/^(?:(LaTeX|Package .+?)\s+)?Warning:\s*(.+?)(?:\s+on input line\s+(\d+))?\.?$/);
+    if (warning || /\bWarning:/.test(line)) {
+      const lineNumber = warning?.[3] ? Number(warning[3]) : findNearbyInputLine(lines, index);
+      pushDiagnostic({
+        severity: "warning",
+        filePath: recentFiles[recentFiles.length - 1] ?? mainPath,
+        line: lineNumber,
+        column: null,
+        message: warning?.[2] ?? line,
+        raw: line
+      });
+      continue;
+    }
+
+    const badBox = line.match(/^((?:Over|Under)full \\[hv]box .+?)(?: at lines? (\d+)(?:--\d+)?)?$/);
+    if (badBox) {
+      pushDiagnostic({
+        severity: "warning",
+        filePath: recentFiles[recentFiles.length - 1] ?? mainPath,
+        line: badBox[2] ? Number(badBox[2]) : null,
+        column: null,
+        message: badBox[1],
+        raw: line
+      });
+    }
+  }
+
+  return diagnostics.slice(0, 50);
+}
+
+function collectDiagnosticMessage(lines: string[], startIndex: number, firstLine: string): string {
+  const parts = [firstLine.trim()];
+  for (let index = startIndex + 1; index < Math.min(lines.length, startIndex + 4); index += 1) {
+    const candidate = lines[index].trim();
+    if (!candidate || candidate.startsWith("l.") || /^<.*>$/.test(candidate) || /^Transcript written/.test(candidate)) break;
+    if (/^(.+?\.(?:tex|cls|sty|bib)):(\d+):/.test(candidate) || /^!/.test(candidate)) break;
+    if (/^(error|warning|fatal error):/i.test(candidate)) break;
+    parts.push(candidate);
+  }
+  return parts.join(" ");
+}
+
+function findNearbyInputLine(lines: string[], startIndex: number): number | null {
+  for (let index = startIndex; index < Math.min(lines.length, startIndex + 8); index += 1) {
+    const inputLine = lines[index].match(/^l\.(\d+)\s/);
+    if (inputLine) return Number(inputLine[1]);
+    const textLine = lines[index].match(/on input line\s+(\d+)/i);
+    if (textLine) return Number(textLine[1]);
+  }
+  return null;
+}
+
+function findNearbyLocation(lines: string[], startIndex: number, files: FileRow[]): { filePath: string | null; line: number | null; column: number | null } {
+  for (let index = Math.max(0, startIndex - 3); index < Math.min(lines.length, startIndex + 5); index += 1) {
+    const match = lines[index].match(/(.+?\.(?:tex|cls|sty|bib)):(\d+)(?::(\d+))?/);
+    if (match) {
+      return {
+        filePath: resolveDiagnosticFilePath(match[1], files),
+        line: Number(match[2]),
+        column: match[3] ? Number(match[3]) : null
+      };
+    }
+  }
+  return { filePath: null, line: null, column: null };
+}
+
+function resolveDiagnosticFilePath(rawPath: string, files: FileRow[]): string | null {
+  const cleanPath = rawPath.trim().replaceAll("\\", "/").replace(/^\.\//, "").replace(/^["']|["']$/g, "");
+  try {
+    const normalized = normalizeProjectPath(cleanPath);
+    if (files.some((file) => file.path === normalized)) return normalized;
+  } catch {
+    // Fall through to basename matching for compiler paths that include absolute prefixes.
+  }
+
+  const basename = path.posix.basename(cleanPath);
+  const basenameMatch = files.find((file) => path.posix.basename(file.path) === basename);
+  return basenameMatch?.path ?? null;
 }
 
 function ensureFolderMetadata(db: UnderleafDb, projectId: string, folderPath: string, now: string): void {

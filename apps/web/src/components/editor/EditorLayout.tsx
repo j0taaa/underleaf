@@ -1,4 +1,4 @@
-import type { CompileJob, ProjectFileWithContent } from "../../api";
+import type { CompileDiagnostic, CompileJob, ProjectFileWithContent } from "../../api";
 import type { LayoutMode, SaveState } from "../../types/editor";
 import { cn } from "../../lib/utils";
 import { PdfPreviewPane } from "./PdfPreviewPane";
@@ -15,7 +15,8 @@ export function EditorLayout({
   sourceTarget,
   onContentChange,
   onPdfReload,
-  onPdfSourceLocated
+  onPdfSourceLocated,
+  onDiagnosticSelected
 }: {
   layout: LayoutMode;
   projectId: string;
@@ -28,6 +29,7 @@ export function EditorLayout({
   onContentChange: (content: string) => void;
   onPdfReload: () => void;
   onPdfSourceLocated: (location: { fileId: string; line: number; column: number }) => void;
+  onDiagnosticSelected: (diagnostic: CompileDiagnostic) => void;
 }) {
   return (
     <section
@@ -39,7 +41,16 @@ export function EditorLayout({
       )}
     >
       {layout !== "pdf" && <SourceEditorPane activeFile={activeFile} content={content} saveState={saveState} sourceTarget={sourceTarget} onContentChange={onContentChange} />}
-      {layout !== "editor" && <PdfPreviewPane projectId={projectId} compileJob={compileJob} pdfNonce={pdfNonce} onReload={onPdfReload} onSourceLocated={onPdfSourceLocated} />}
+      {layout !== "editor" && (
+        <PdfPreviewPane
+          projectId={projectId}
+          compileJob={compileJob}
+          pdfNonce={pdfNonce}
+          onReload={onPdfReload}
+          onSourceLocated={onPdfSourceLocated}
+          onDiagnosticSelected={onDiagnosticSelected}
+        />
+      )}
     </section>
   );
 }

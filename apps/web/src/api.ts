@@ -34,8 +34,18 @@ export type CompileJob = {
   stderr: string;
   pdfPath: string | null;
   durationMs: number | null;
+  diagnostics: CompileDiagnostic[];
   createdAt: string;
   updatedAt: string;
+};
+
+export type CompileDiagnostic = {
+  severity: "error" | "warning";
+  filePath: string | null;
+  line: number | null;
+  column: number | null;
+  message: string;
+  raw: string;
 };
 
 export type PdfSourceLocation = {

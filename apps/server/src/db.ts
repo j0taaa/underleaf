@@ -28,6 +28,17 @@ export type FolderRow = {
 
 export type CompileStatus = "queued" | "running" | "success" | "error";
 
+export type CompileDiagnosticSeverity = "error" | "warning";
+
+export type CompileDiagnosticRow = {
+  severity: CompileDiagnosticSeverity;
+  filePath: string | null;
+  line: number | null;
+  column: number | null;
+  message: string;
+  raw: string;
+};
+
 export type CompileJobRow = {
   id: string;
   projectId: string;
@@ -36,6 +47,7 @@ export type CompileJobRow = {
   stderr: string;
   pdfPath: string | null;
   durationMs: number | null;
+  diagnostics: CompileDiagnosticRow[];
   createdAt: string;
   updatedAt: string;
 };
@@ -98,6 +110,7 @@ export function createDb(databaseUrl: string) {
       stderr TEXT NOT NULL DEFAULT '',
       pdf_path TEXT,
       duration_ms INTEGER,
+      diagnostics TEXT NOT NULL DEFAULT '[]',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -110,6 +123,8 @@ export function createDb(databaseUrl: string) {
       created_at TEXT NOT NULL
     );
   `);
+
+  ensureColumn(db, "compile_jobs", "diagnostics", "TEXT NOT NULL DEFAULT '[]'");
 
   db.prepare(
     "INSERT OR IGNORE INTO users (id, email, display_name, created_at) VALUES (?, ?, ?, ?)"
@@ -222,7 +237,7 @@ export function createDb(databaseUrl: string) {
       return transaction();
     },
     createCompileJob(job: CompileJobRow): void {
-      db.prepare("INSERT INTO compile_jobs (id, project_id, status, stdout, stderr, pdf_path, duration_ms, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+      db.prepare("INSERT INTO compile_jobs (id, project_id, status, stdout, stderr, pdf_path, duration_ms, diagnostics, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
         job.id,
         job.projectId,
         job.status,
@@ -230,24 +245,27 @@ export function createDb(databaseUrl: string) {
         job.stderr,
         job.pdfPath,
         job.durationMs,
+        JSON.stringify(job.diagnostics),
         job.createdAt,
         job.updatedAt
       );
     },
     updateCompileJob(job: CompileJobRow): void {
-      db.prepare("UPDATE compile_jobs SET status = ?, stdout = ?, stderr = ?, pdf_path = ?, duration_ms = ?, updated_at = ? WHERE id = ?").run(
+      db.prepare("UPDATE compile_jobs SET status = ?, stdout = ?, stderr = ?, pdf_path = ?, duration_ms = ?, diagnostics = ?, updated_at = ? WHERE id = ?").run(
         job.status,
         job.stdout,
         job.stderr,
         job.pdfPath,
         job.durationMs,
+        JSON.stringify(job.diagnostics),
         job.updatedAt,
         job.id
       );
       db.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").run(job.updatedAt, job.projectId);
     },
     latestCompileJob(projectId: string): CompileJobRow | undefined {
-      return db.prepare("SELECT id, project_id as projectId, status, stdout, stderr, pdf_path as pdfPath, duration_ms as durationMs, created_at as createdAt, updated_at as updatedAt FROM compile_jobs WHERE project_id = ? ORDER BY created_at DESC LIMIT 1").get(projectId) as CompileJobRow | undefined;
+      const row = db.prepare("SELECT id, project_id as projectId, status, stdout, stderr, pdf_path as pdfPath, duration_ms as durationMs, diagnostics, created_at as createdAt, updated_at as updatedAt FROM compile_jobs WHERE project_id = ? ORDER BY created_at DESC LIMIT 1").get(projectId) as (Omit<CompileJobRow, "diagnostics"> & { diagnostics: string }) | undefined;
+      return row ? hydrateCompileJob(row) : undefined;
     },
     listSnapshots(projectId: string): ProjectSnapshotRow[] {
       return db.prepare("SELECT id, project_id as projectId, label, file_count as fileCount, created_at as createdAt FROM project_snapshots WHERE project_id = ? ORDER BY created_at DESC").all(projectId) as ProjectSnapshotRow[];
@@ -285,4 +303,23 @@ export function createDb(databaseUrl: string) {
       transaction();
     }
   };
+}
+
+function ensureColumn(db: Database.Database, table: string, column: string, definition: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!columns.some((item) => item.name === column)) {
+    db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
+  }
+}
+
+function hydrateCompileJob(row: Omit<CompileJobRow, "diagnostics"> & { diagnostics: string }): CompileJobRow {
+  let diagnostics: CompileDiagnosticRow[] = [];
+  try {
+    const parsed = JSON.parse(row.diagnostics);
+    diagnostics = Array.isArray(parsed) ? parsed : [];
+  } catch {
+    diagnostics = [];
+  }
+
+  return { ...row, diagnostics };
 }

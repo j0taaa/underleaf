@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { api, type CompileJob, type ProjectFile, type ProjectFileWithContent, type ProjectFolder } from "../api";
+import { api, type CompileDiagnostic, type CompileJob, type ProjectFile, type ProjectFileWithContent, type ProjectFolder } from "../api";
 import { EditorHeader } from "../components/editor/EditorHeader";
 import { EditorLayout } from "../components/editor/EditorLayout";
 import { FileSidebar } from "../components/editor/FileSidebar";
@@ -333,6 +333,20 @@ export function ProjectEditorPage() {
     if (layout === "pdf") setLayout("split");
   };
 
+  const showCompileDiagnostic = async (diagnostic: CompileDiagnostic) => {
+    const file = diagnostic.filePath ? files.find((item) => item.path === diagnostic.filePath) : activeFile;
+    if (!file) return;
+
+    await openFile(file);
+    setSourceTarget({
+      fileId: file.id,
+      line: diagnostic.line ?? 1,
+      column: diagnostic.column ?? 1,
+      nonce: Date.now()
+    });
+    if (layout === "pdf") setLayout("split");
+  };
+
   const statusText = useMemo(() => {
     if (compileMutation.isPending) return "Compiling";
     if (compileJob?.status === "success") return `Compiled in ${compileJob.durationMs ?? 0} ms`;
@@ -408,6 +422,7 @@ export function ProjectEditorPage() {
           onContentChange={setContent}
           onPdfReload={() => setPdfNonce(Date.now())}
           onPdfSourceLocated={(location) => void showPdfSource(location)}
+          onDiagnosticSelected={(diagnostic) => void showCompileDiagnostic(diagnostic)}
         />
         {historyOpen && (
           <HistoryPanel
