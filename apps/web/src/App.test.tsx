@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 
@@ -17,7 +18,11 @@ describe("App", () => {
       }))
     );
 
-    render(<App />);
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>
+    );
 
     expect(await screen.findByText("Underleaf")).toBeInTheDocument();
     expect(await screen.findByText("Create project")).toBeInTheDocument();

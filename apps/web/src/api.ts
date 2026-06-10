@@ -65,6 +65,9 @@ export const api = {
       body: JSON.stringify(input)
     });
   },
+  getProject(projectId: string) {
+    return request<Project>(`/api/projects/${projectId}`);
+  },
   updateProject(projectId: string, name: string) {
     return request<Project>(`/api/projects/${projectId}`, {
       method: "PATCH",
