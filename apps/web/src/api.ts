@@ -26,6 +26,14 @@ export type ProjectFileWithContent = ProjectFile & {
   content: string;
 };
 
+export type ProjectSearchResult = {
+  fileId: string;
+  path: string;
+  line: number;
+  column: number;
+  preview: string;
+};
+
 export type CompileJob = {
   id: string;
   projectId: string;
@@ -123,6 +131,9 @@ export const api = {
   },
   listFolders(projectId: string) {
     return request<ProjectFolder[]>(`/api/projects/${projectId}/folders`);
+  },
+  searchProject(projectId: string, query: string) {
+    return request<ProjectSearchResult[]>(`/api/projects/${projectId}/search?q=${encodeURIComponent(query)}`);
   },
   listSnapshots(projectId: string) {
     return request<ProjectSnapshot[]>(`/api/projects/${projectId}/snapshots`);

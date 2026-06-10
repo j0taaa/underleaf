@@ -210,6 +210,33 @@ describe("projects and files", () => {
     await expect(fs.readFile(path.join(tmpDir, "projects", project.id, "figures", "logo-1.png"), "utf8")).resolves.toBe("PNGDATA2");
   });
 
+  it("searches project text files and reports source locations", async () => {
+    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Searchable" } });
+    const project = projectResponse.json<{ id: string }>();
+    const files = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
+    const mainFile = files.find((file) => file.path === "main.tex");
+    expect(mainFile).toBeDefined();
+
+    await app.inject({
+      method: "PUT",
+      url: `/api/projects/${project.id}/files/${mainFile?.id}/content`,
+      payload: { content: "\\documentclass{article}\n\\begin{document}\nA searchable theorem lives here.\n\\end{document}" }
+    });
+    await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/files`,
+      payload: { path: "notes.txt", content: "Another searchable note" }
+    });
+
+    const response = await app.inject({ method: "GET", url: `/api/projects/${project.id}/search?q=searchable` });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<Array<{ path: string; line: number; column: number; preview: string }>>()).toEqual([
+      expect.objectContaining({ path: "main.tex", line: 3, column: 3, preview: "A searchable theorem lives here." }),
+      expect.objectContaining({ path: "notes.txt", line: 1, column: 9, preview: "Another searchable note" })
+    ]);
+  });
+
   it("creates and restores project snapshots", async () => {
     const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "History" } });
     const project = projectResponse.json<{ id: string }>();

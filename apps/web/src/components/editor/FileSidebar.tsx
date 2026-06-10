@@ -14,10 +14,11 @@ import {
 } from "lucide-react";
 import type React from "react";
 import { useMemo, useState } from "react";
-import type { ProjectFile, ProjectFileWithContent, ProjectFolder } from "../../api";
+import type { ProjectFile, ProjectFileWithContent, ProjectFolder, ProjectSearchResult } from "../../api";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { ProjectSearchPanel } from "./ProjectSearchPanel";
 
 type ExplorerNode =
   | { kind: "folder"; id?: string; name: string; path: string; children: ExplorerNode[] }
@@ -37,7 +38,12 @@ export function FileSidebar({
   onOpenFile,
   onDeleteFile,
   onDeleteFolder,
-  onUploadItems
+  onUploadItems,
+  searchQuery,
+  searchResults,
+  searching,
+  onSearchQueryChange,
+  onOpenSearchResult
 }: {
   files: ProjectFile[];
   folders: ProjectFolder[];
@@ -50,6 +56,11 @@ export function FileSidebar({
   onDeleteFile: (file: ProjectFile) => void;
   onDeleteFolder: (folder: ProjectFolder) => void;
   onUploadItems: (dataTransfer: DataTransfer, parentPath: string) => void;
+  searchQuery: string;
+  searchResults: ProjectSearchResult[];
+  searching: boolean;
+  onSearchQueryChange: (query: string) => void;
+  onOpenSearchResult: (result: ProjectSearchResult) => void;
 }) {
   const tree = useMemo(() => buildTree(files, folders), [files, folders]);
   const folderByPath = useMemo(() => new Map(folders.map((folder) => [folder.path, folder])), [folders]);
@@ -141,6 +152,14 @@ export function FileSidebar({
         <ChevronDown className="h-3.5 w-3.5" />
         Underleaf Project
       </div>
+
+      <ProjectSearchPanel
+        query={searchQuery}
+        results={searchResults}
+        searching={searching}
+        onQueryChange={onSearchQueryChange}
+        onOpenResult={onOpenSearchResult}
+      />
 
       <div className="min-h-0 flex-1 overflow-auto py-1 text-sm">
         {draft?.parentPath === "" && (

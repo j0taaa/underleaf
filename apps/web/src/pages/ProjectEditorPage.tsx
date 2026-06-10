@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { api, type CompileDiagnostic, type CompileJob, type ProjectFile, type ProjectFileWithContent, type ProjectFolder } from "../api";
+import { api, type CompileDiagnostic, type CompileJob, type ProjectFile, type ProjectFileWithContent, type ProjectFolder, type ProjectSearchResult } from "../api";
 import { EditorHeader } from "../components/editor/EditorHeader";
 import { EditorLayout } from "../components/editor/EditorLayout";
 import { FileSidebar } from "../components/editor/FileSidebar";
@@ -41,6 +41,8 @@ export function ProjectEditorPage() {
   const [sourceTarget, setSourceTarget] = useState<{ fileId: string; line: number; column: number; nonce: number } | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [snapshotLabel, setSnapshotLabel] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
 
   const projectQuery = useQuery({
     queryKey: ["project", projectId],
@@ -67,15 +69,40 @@ export function ProjectEditorPage() {
     queryFn: () => api.latestCompile(projectId)
   });
 
+  const projectSearchQuery = useQuery({
+    queryKey: ["project-search", projectId, debouncedSearchQuery],
+    queryFn: () => api.searchProject(projectId, debouncedSearchQuery),
+    enabled: debouncedSearchQuery.trim().length >= 2
+  });
+
   const project = projectQuery.data ?? null;
   const files = filesQuery.data ?? [];
   const folders = foldersQuery.data ?? [];
   const snapshots = snapshotsQuery.data ?? [];
   const compileJob = compileOverride ?? latestCompileQuery.data ?? null;
+  const searchResults = debouncedSearchQuery.trim().length >= 2 ? projectSearchQuery.data ?? [] : [];
 
   useEffect(() => {
     if (project) setProjectName(project.name);
   }, [project]);
+
+  useEffect(() => {
+    setActiveFile(null);
+    setContent("");
+    setSaveState("idle");
+    setSourceTarget(null);
+    setCompileOverride(null);
+    setSearchQuery("");
+    setDebouncedSearchQuery("");
+  }, [projectId]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery.trim());
+    }, 250);
+
+    return () => window.clearTimeout(timer);
+  }, [searchQuery]);
 
   useEffect(() => {
     const selectFirstFile = async () => {
@@ -227,7 +254,7 @@ export function ProjectEditorPage() {
   });
 
   useEffect(() => {
-    if (!projectId || !activeFile || content === activeFile.content) return;
+    if (!projectId || !activeFile || activeFile.projectId !== projectId || content === activeFile.content) return;
     setSaveState("saving");
     const timer = window.setTimeout(() => {
       saveFileMutation.mutate({ fileId: activeFile.id, nextContent: content });
@@ -347,6 +374,20 @@ export function ProjectEditorPage() {
     if (layout === "pdf") setLayout("split");
   };
 
+  const showSearchResult = async (result: ProjectSearchResult) => {
+    const file = files.find((item) => item.id === result.fileId);
+    if (!file) return;
+
+    await openFile(file);
+    setSourceTarget({
+      fileId: file.id,
+      line: result.line,
+      column: result.column,
+      nonce: Date.now()
+    });
+    if (layout === "pdf") setLayout("split");
+  };
+
   const statusText = useMemo(() => {
     if (compileMutation.isPending) return "Compiling";
     if (compileJob?.status === "success") return `Compiled in ${compileJob.durationMs ?? 0} ms`;
@@ -409,6 +450,11 @@ export function ProjectEditorPage() {
           onDeleteFile={(file) => void deleteFile(file)}
           onDeleteFolder={(folder) => void deleteFolder(folder)}
           onUploadItems={(dataTransfer, parentPath) => void uploadDroppedItems(dataTransfer, parentPath)}
+          searchQuery={searchQuery}
+          searchResults={searchResults}
+          searching={projectSearchQuery.isFetching}
+          onSearchQueryChange={setSearchQuery}
+          onOpenSearchResult={(result) => void showSearchResult(result)}
         />
         <EditorLayout
           layout={layout}

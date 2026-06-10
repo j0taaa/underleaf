@@ -15,8 +15,16 @@ type UpdateProjectBody = { name?: string };
 type CreateFileBody = { path?: string; content?: string };
 type UpdateFileBody = { content?: string };
 type RenamePathBody = { path?: string };
+type ProjectSearchQuery = { q?: string };
 type PdfSourceBody = { page?: number; x?: number; y?: number; text?: string };
 type CreateSnapshotBody = { label?: string };
+type ProjectSearchResult = {
+  fileId: string;
+  path: string;
+  line: number;
+  column: number;
+  preview: string;
+};
 type SnapshotManifest = {
   id: string;
   projectId: string;
@@ -98,6 +106,16 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/folders", async (request, reply) => {
     if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
     return db.listFolders(request.params.projectId);
+  });
+
+  app.get<{ Params: { projectId: string }; Querystring: ProjectSearchQuery }>("/api/projects/:projectId/search", async (request, reply) => {
+    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+
+    const query = request.query.q?.trim() ?? "";
+    if (query.length < 2) return [];
+    if (query.length > 120) return reply.code(400).send({ message: "Search query is too long" });
+
+    return searchProjectFiles(db, config, request.params.projectId, query);
   });
 
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/snapshots", async (request, reply) => {
@@ -829,6 +847,49 @@ function stripLatexMarkup(line: string): string {
 
 function normalizeSearchText(value: string): string {
   return value.toLowerCase().replace(/\\[a-z]+\*?/g, " ").replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ");
+}
+
+async function searchProjectFiles(db: UnderleafDb, config: ServerConfig, projectId: string, query: string): Promise<ProjectSearchResult[]> {
+  const root = path.resolve(projectRoot(config.dataDir, projectId));
+  const needle = query.toLowerCase();
+  const results: ProjectSearchResult[] = [];
+
+  for (const file of db.listFiles(projectId)) {
+    if (!isSearchableFile(file.path)) continue;
+
+    const absoluteFile = path.resolve(root, normalizeProjectPath(file.path));
+    if (!absoluteFile.startsWith(root)) continue;
+
+    const stat = await fs.stat(absoluteFile).catch(() => null);
+    if (!stat?.isFile() || stat.size > 1024 * 1024) continue;
+
+    const content = await fs.readFile(absoluteFile, "utf8").catch(() => "");
+    if (content.includes("\u0000")) continue;
+
+    const lines = content.split(/\r?\n/);
+    for (let index = 0; index < lines.length; index += 1) {
+      const columnIndex = lines[index].toLowerCase().indexOf(needle);
+      if (columnIndex === -1) continue;
+
+      results.push({
+        fileId: file.id,
+        path: file.path,
+        line: index + 1,
+        column: columnIndex + 1,
+        preview: lines[index].trim() || lines[index]
+      });
+
+      if (results.length >= 200) return results;
+    }
+  }
+
+  return results;
+}
+
+function isSearchableFile(filePath: string): boolean {
+  const extension = path.posix.extname(filePath).toLowerCase();
+  if (!extension) return true;
+  return new Set([".bib", ".cls", ".csv", ".md", ".sty", ".tex", ".txt"]).has(extension);
 }
 
 function spawnCommand(bin: string, args: string[], cwd: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
