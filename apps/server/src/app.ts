@@ -13,6 +13,7 @@ type CreateProjectBody = { name?: string; template?: string };
 type UpdateProjectBody = { name?: string };
 type CreateFileBody = { path?: string; content?: string };
 type UpdateFileBody = { content?: string };
+type RenamePathBody = { path?: string };
 
 export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance {
   const app = Fastify({ logger: true });
@@ -78,6 +79,11 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
     return db.listFiles(request.params.projectId);
   });
 
+  app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/folders", async (request, reply) => {
+    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    return db.listFolders(request.params.projectId);
+  });
+
   app.get<{ Params: { projectId: string; fileId: string } }>("/api/projects/:projectId/files/:fileId", async (request, reply) => {
     const file = db.getFile(request.params.projectId, request.params.fileId);
     if (!file) return reply.code(404).send({ message: "File not found" });
@@ -95,6 +101,32 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
     return { ...file, content: request.body.content ?? "" };
   });
 
+  app.patch<{ Params: { projectId: string; fileId: string }; Body: RenamePathBody }>("/api/projects/:projectId/files/:fileId", async (request, reply) => {
+    const file = db.getFile(request.params.projectId, request.params.fileId);
+    if (!file) return reply.code(404).send({ message: "File not found" });
+
+    let safePath: string;
+    try {
+      safePath = normalizeProjectPath(request.body.path ?? "");
+    } catch {
+      return reply.code(400).send({ message: "Invalid file path" });
+    }
+
+    if (safePath === file.path) return file;
+    if (db.getFileByPath(file.projectId, safePath)) return reply.code(409).send({ message: "File already exists" });
+    if (db.getFolderByPath(file.projectId, safePath)) return reply.code(409).send({ message: "A folder already exists at that path" });
+    if (hasFileAncestor(db, file.projectId, safePath)) return reply.code(409).send({ message: "Parent path is a file" });
+
+    const currentPath = projectFilePath(config.dataDir, file.projectId, file.path);
+    const nextPath = projectFilePath(config.dataDir, file.projectId, safePath);
+    await ensureParentDir(nextPath);
+    await fs.rename(currentPath, nextPath);
+    const now = new Date().toISOString();
+    ensureFolderMetadata(db, file.projectId, path.posix.dirname(safePath), now);
+    db.renameFile(file.projectId, file.id, safePath, now);
+    return db.getFile(file.projectId, file.id);
+  });
+
   app.post<{ Params: { projectId: string }; Body: CreateFileBody }>("/api/projects/:projectId/files", async (request, reply) => {
     if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
 
@@ -108,13 +140,65 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
     if (db.getFileByPath(request.params.projectId, safePath)) {
       return reply.code(409).send({ message: "File already exists" });
     }
+    if (db.getFolderByPath(request.params.projectId, safePath)) return reply.code(409).send({ message: "A folder already exists at that path" });
+    if (hasFileAncestor(db, request.params.projectId, safePath)) return reply.code(409).send({ message: "Parent path is a file" });
 
     const now = new Date().toISOString();
     const file = { id: nanoid(), projectId: request.params.projectId, path: safePath, createdAt: now, updatedAt: now };
     await ensureParentDir(projectFilePath(config.dataDir, request.params.projectId, safePath));
     await fs.writeFile(projectFilePath(config.dataDir, request.params.projectId, safePath), request.body.content ?? "", "utf8");
+    ensureFolderMetadata(db, request.params.projectId, path.posix.dirname(safePath), now);
     db.createFile(file);
     return reply.code(201).send(file);
+  });
+
+  app.post<{ Params: { projectId: string }; Body: RenamePathBody }>("/api/projects/:projectId/folders", async (request, reply) => {
+    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+
+    let safePath: string;
+    try {
+      safePath = normalizeProjectPath(request.body.path ?? "");
+    } catch {
+      return reply.code(400).send({ message: "Invalid folder path" });
+    }
+
+    if (db.getFolderByPath(request.params.projectId, safePath)) return reply.code(409).send({ message: "Folder already exists" });
+    if (db.getFileByPath(request.params.projectId, safePath)) return reply.code(409).send({ message: "A file already exists at that path" });
+    if (hasFileAncestor(db, request.params.projectId, safePath)) return reply.code(409).send({ message: "Parent path is a file" });
+
+    const now = new Date().toISOString();
+    const folder = { id: nanoid(), projectId: request.params.projectId, path: safePath, createdAt: now, updatedAt: now };
+    await fs.mkdir(projectFilePath(config.dataDir, request.params.projectId, safePath), { recursive: true });
+    ensureFolderMetadata(db, request.params.projectId, path.posix.dirname(safePath), now);
+    db.createFolder(folder);
+    return reply.code(201).send(folder);
+  });
+
+  app.patch<{ Params: { projectId: string; folderId: string }; Body: RenamePathBody }>("/api/projects/:projectId/folders/:folderId", async (request, reply) => {
+    const folder = db.getFolder(request.params.projectId, request.params.folderId);
+    if (!folder) return reply.code(404).send({ message: "Folder not found" });
+
+    let safePath: string;
+    try {
+      safePath = normalizeProjectPath(request.body.path ?? "");
+    } catch {
+      return reply.code(400).send({ message: "Invalid folder path" });
+    }
+
+    if (safePath === folder.path) return folder;
+    if (safePath.startsWith(`${folder.path}/`)) return reply.code(400).send({ message: "Folder cannot be moved inside itself" });
+    if (db.getFolderByPath(folder.projectId, safePath)) return reply.code(409).send({ message: "Folder already exists" });
+    if (db.getFileByPath(folder.projectId, safePath)) return reply.code(409).send({ message: "A file already exists at that path" });
+    if (hasFileAncestor(db, folder.projectId, safePath)) return reply.code(409).send({ message: "Parent path is a file" });
+
+    const currentPath = projectFilePath(config.dataDir, folder.projectId, folder.path);
+    const nextPath = projectFilePath(config.dataDir, folder.projectId, safePath);
+    await ensureParentDir(nextPath);
+    await fs.rename(currentPath, nextPath);
+    const now = new Date().toISOString();
+    ensureFolderMetadata(db, folder.projectId, path.posix.dirname(safePath), now);
+    db.renameFolder(folder.projectId, folder.id, folder.path, safePath, now);
+    return db.getFolder(folder.projectId, folder.id);
   });
 
   app.delete<{ Params: { projectId: string; fileId: string } }>("/api/projects/:projectId/files/:fileId", async (request, reply) => {
@@ -122,6 +206,14 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
     if (!file) return reply.code(404).send({ message: "File not found" });
     db.deleteFile(file.projectId, file.id);
     await fs.rm(projectFilePath(config.dataDir, file.projectId, file.path), { force: true });
+    return reply.code(204).send();
+  });
+
+  app.delete<{ Params: { projectId: string; folderId: string } }>("/api/projects/:projectId/folders/:folderId", async (request, reply) => {
+    const folder = db.getFolder(request.params.projectId, request.params.folderId);
+    if (!folder) return reply.code(404).send({ message: "Folder not found" });
+    db.deleteFolder(folder.projectId, folder.id, folder.path);
+    await fs.rm(projectFilePath(config.dataDir, folder.projectId, folder.path), { recursive: true, force: true });
     return reply.code(204).send();
   });
 
@@ -223,6 +315,26 @@ async function spawnCompiler(config: ServerConfig, cwd: string): Promise<{ code:
 
 function isMissingCommandError(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+function ensureFolderMetadata(db: UnderleafDb, projectId: string, folderPath: string, now: string): void {
+  if (!folderPath || folderPath === ".") return;
+
+  const parts = folderPath.split("/");
+  for (let index = 0; index < parts.length; index += 1) {
+    const currentPath = parts.slice(0, index + 1).join("/");
+    if (!db.getFolderByPath(projectId, currentPath)) {
+      db.createFolder({ id: nanoid(), projectId, path: currentPath, createdAt: now, updatedAt: now });
+    }
+  }
+}
+
+function hasFileAncestor(db: UnderleafDb, projectId: string, itemPath: string): boolean {
+  const parts = itemPath.split("/");
+  for (let index = 1; index < parts.length; index += 1) {
+    if (db.getFileByPath(projectId, parts.slice(0, index).join("/"))) return true;
+  }
+  return false;
 }
 
 function spawnCommand(bin: string, args: string[], cwd: string): Promise<{ code: number | null; stdout: string; stderr: string }> {

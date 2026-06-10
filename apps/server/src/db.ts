@@ -18,6 +18,14 @@ export type FileRow = {
   updatedAt: string;
 };
 
+export type FolderRow = {
+  id: string;
+  projectId: string;
+  path: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type CompileStatus = "queued" | "running" | "success" | "error";
 
 export type CompileJobRow = {
@@ -57,6 +65,15 @@ export function createDb(databaseUrl: string) {
     );
 
     CREATE TABLE IF NOT EXISTS files (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      path TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(project_id, path)
+    );
+
+    CREATE TABLE IF NOT EXISTS folders (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
       path TEXT NOT NULL,
@@ -125,6 +142,11 @@ export function createDb(databaseUrl: string) {
         file.updatedAt
       );
     },
+    renameFile(projectId: string, fileId: string, nextPath: string, updatedAt: string): boolean {
+      const result = db.prepare("UPDATE files SET path = ?, updated_at = ? WHERE project_id = ? AND id = ?").run(nextPath, updatedAt, projectId, fileId);
+      db.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").run(updatedAt, projectId);
+      return result.changes > 0;
+    },
     updateFileTimestamp(projectId: string, fileId: string, updatedAt: string): boolean {
       const result = db.prepare("UPDATE files SET updated_at = ? WHERE project_id = ? AND id = ?").run(updatedAt, projectId, fileId);
       db.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").run(updatedAt, projectId);
@@ -133,6 +155,55 @@ export function createDb(databaseUrl: string) {
     deleteFile(projectId: string, fileId: string): boolean {
       const result = db.prepare("DELETE FROM files WHERE project_id = ? AND id = ?").run(projectId, fileId);
       return result.changes > 0;
+    },
+    listFolders(projectId: string): FolderRow[] {
+      return db.prepare("SELECT id, project_id as projectId, path, created_at as createdAt, updated_at as updatedAt FROM folders WHERE project_id = ? ORDER BY path ASC").all(projectId) as FolderRow[];
+    },
+    getFolder(projectId: string, folderId: string): FolderRow | undefined {
+      return db.prepare("SELECT id, project_id as projectId, path, created_at as createdAt, updated_at as updatedAt FROM folders WHERE project_id = ? AND id = ?").get(projectId, folderId) as FolderRow | undefined;
+    },
+    getFolderByPath(projectId: string, folderPath: string): FolderRow | undefined {
+      return db.prepare("SELECT id, project_id as projectId, path, created_at as createdAt, updated_at as updatedAt FROM folders WHERE project_id = ? AND path = ?").get(projectId, folderPath) as FolderRow | undefined;
+    },
+    createFolder(folder: FolderRow): void {
+      db.prepare("INSERT INTO folders (id, project_id, path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run(
+        folder.id,
+        folder.projectId,
+        folder.path,
+        folder.createdAt,
+        folder.updatedAt
+      );
+      db.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").run(folder.updatedAt, folder.projectId);
+    },
+    renameFolder(projectId: string, folderId: string, oldPath: string, nextPath: string, updatedAt: string): boolean {
+      const transaction = db.transaction(() => {
+        const result = db.prepare("UPDATE folders SET path = ?, updated_at = ? WHERE project_id = ? AND id = ?").run(nextPath, updatedAt, projectId, folderId);
+        const childFolders = db.prepare("SELECT id, path FROM folders WHERE project_id = ? AND path LIKE ?").all(projectId, `${oldPath}/%`) as Array<{ id: string; path: string }>;
+        const childFiles = db.prepare("SELECT id, path FROM files WHERE project_id = ? AND path LIKE ?").all(projectId, `${oldPath}/%`) as Array<{ id: string; path: string }>;
+
+        for (const folder of childFolders) {
+          db.prepare("UPDATE folders SET path = ?, updated_at = ? WHERE id = ?").run(folder.path.replace(`${oldPath}/`, `${nextPath}/`), updatedAt, folder.id);
+        }
+
+        for (const file of childFiles) {
+          db.prepare("UPDATE files SET path = ?, updated_at = ? WHERE id = ?").run(file.path.replace(`${oldPath}/`, `${nextPath}/`), updatedAt, file.id);
+        }
+
+        db.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").run(updatedAt, projectId);
+        return result.changes > 0;
+      });
+
+      return transaction();
+    },
+    deleteFolder(projectId: string, folderId: string, folderPath: string): boolean {
+      const transaction = db.transaction(() => {
+        const result = db.prepare("DELETE FROM folders WHERE project_id = ? AND (id = ? OR path LIKE ?)").run(projectId, folderId, `${folderPath}/%`);
+        db.prepare("DELETE FROM files WHERE project_id = ? AND path LIKE ?").run(projectId, `${folderPath}/%`);
+        db.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").run(new Date().toISOString(), projectId);
+        return result.changes > 0;
+      });
+
+      return transaction();
     },
     createCompileJob(job: CompileJobRow): void {
       db.prepare("INSERT INTO compile_jobs (id, project_id, status, stdout, stderr, pdf_path, duration_ms, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(

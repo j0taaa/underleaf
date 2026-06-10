@@ -43,7 +43,7 @@ export function registerLatexLanguage(monaco: Monaco) {
     tokenizer: {
       root: [
         [/%.*$/, "comment"],
-        [/\\(begin|end)(\s*)(\{)([A-Za-z*]+)(\})/, ["keyword.control", "", "delimiter.bracket", "tag", "delimiter.bracket"]],
+        [/\\(?:begin|end)\s*\{[A-Za-z*]+\}/, "keyword.control"],
         [
           /\\(documentclass|usepackage|title|author|date|maketitle|tableofcontents|section|subsection|subsubsection|paragraph|chapter|part|item|label|ref|cite|bibliography|bibliographystyle)\b/,
           "keyword"

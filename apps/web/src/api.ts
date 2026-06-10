@@ -14,6 +14,14 @@ export type ProjectFile = {
   updatedAt: string;
 };
 
+export type ProjectFolder = {
+  id: string;
+  projectId: string;
+  path: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ProjectFileWithContent = ProjectFile & {
   content: string;
 };
@@ -80,6 +88,9 @@ export const api = {
   listFiles(projectId: string) {
     return request<ProjectFile[]>(`/api/projects/${projectId}/files`);
   },
+  listFolders(projectId: string) {
+    return request<ProjectFolder[]>(`/api/projects/${projectId}/folders`);
+  },
   getFile(projectId: string, fileId: string) {
     return request<ProjectFileWithContent>(`/api/projects/${projectId}/files/${fileId}`);
   },
@@ -95,8 +106,29 @@ export const api = {
       body: JSON.stringify({ path, content: "" })
     });
   },
+  renameFile(projectId: string, fileId: string, path: string) {
+    return request<ProjectFile>(`/api/projects/${projectId}/files/${fileId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ path })
+    });
+  },
   deleteFile(projectId: string, fileId: string) {
     return request<void>(`/api/projects/${projectId}/files/${fileId}`, { method: "DELETE" });
+  },
+  createFolder(projectId: string, path: string) {
+    return request<ProjectFolder>(`/api/projects/${projectId}/folders`, {
+      method: "POST",
+      body: JSON.stringify({ path })
+    });
+  },
+  renameFolder(projectId: string, folderId: string, path: string) {
+    return request<ProjectFolder>(`/api/projects/${projectId}/folders/${folderId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ path })
+    });
+  },
+  deleteFolder(projectId: string, folderId: string) {
+    return request<void>(`/api/projects/${projectId}/folders/${folderId}`, { method: "DELETE" });
   },
   compile(projectId: string) {
     return request<CompileJob>(`/api/projects/${projectId}/compile`, { method: "POST" });

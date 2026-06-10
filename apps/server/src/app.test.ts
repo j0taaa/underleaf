@@ -81,6 +81,91 @@ describe("projects and files", () => {
     const fileResponse = await app.inject({ method: "GET", url: `/api/projects/${project.id}/files/${files[0].id}` });
     expect(fileResponse.json<{ content: string }>().content).toContain("Updated");
   });
+
+  it("creates parent folder metadata for nested files", async () => {
+    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Nested" } });
+    const project = projectResponse.json<{ id: string }>();
+
+    const fileResponse = await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/files`,
+      payload: { path: "chapters/intro.tex", content: "Intro" }
+    });
+
+    expect(fileResponse.statusCode).toBe(201);
+    const foldersResponse = await app.inject({ method: "GET", url: `/api/projects/${project.id}/folders` });
+    expect(foldersResponse.json<Array<{ path: string }>>()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ path: "chapters" })])
+    );
+  });
+
+  it("renames and deletes folders recursively", async () => {
+    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Folders" } });
+    const project = projectResponse.json<{ id: string }>();
+
+    const folderResponse = await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/folders`,
+      payload: { path: "sections" }
+    });
+    const folder = folderResponse.json<{ id: string }>();
+
+    await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/files`,
+      payload: { path: "sections/intro.tex", content: "Intro" }
+    });
+
+    const renameResponse = await app.inject({
+      method: "PATCH",
+      url: `/api/projects/${project.id}/folders/${folder.id}`,
+      payload: { path: "chapters" }
+    });
+
+    expect(renameResponse.statusCode).toBe(200);
+    const filesAfterRename = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ path: string }>>();
+    expect(filesAfterRename).toEqual(expect.arrayContaining([expect.objectContaining({ path: "chapters/intro.tex" })]));
+
+    const renamedFolder = renameResponse.json<{ id: string }>();
+    const deleteResponse = await app.inject({ method: "DELETE", url: `/api/projects/${project.id}/folders/${renamedFolder.id}` });
+    expect(deleteResponse.statusCode).toBe(204);
+
+    const filesAfterDelete = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ path: string }>>();
+    expect(filesAfterDelete.some((file) => file.path.startsWith("chapters/"))).toBe(false);
+  });
+
+  it("rejects file and folder path collisions", async () => {
+    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Collisions" } });
+    const project = projectResponse.json<{ id: string }>();
+
+    const folderResponse = await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/folders`,
+      payload: { path: "sections" }
+    });
+    expect(folderResponse.statusCode).toBe(201);
+
+    const fileAtFolderPathResponse = await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/files`,
+      payload: { path: "sections", content: "" }
+    });
+    expect(fileAtFolderPathResponse.statusCode).toBe(409);
+
+    const fileResponse = await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/files`,
+      payload: { path: "notes.tex", content: "" }
+    });
+    expect(fileResponse.statusCode).toBe(201);
+
+    const folderUnderFileResponse = await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/folders`,
+      payload: { path: "notes.tex/assets" }
+    });
+    expect(folderUnderFileResponse.statusCode).toBe(409);
+  });
 });
 
 describe("compile", () => {

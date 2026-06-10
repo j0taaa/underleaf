@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { api, type CompileJob, type ProjectFile, type ProjectFileWithContent } from "../api";
+import { api, type CompileJob, type ProjectFile, type ProjectFileWithContent, type ProjectFolder } from "../api";
 import { EditorHeader } from "../components/editor/EditorHeader";
 import { EditorLayout } from "../components/editor/EditorLayout";
 import { FileSidebar } from "../components/editor/FileSidebar";
@@ -16,7 +16,6 @@ export function ProjectEditorPage() {
   const [layout, setLayout] = useState<LayoutMode>("split");
   const [compileOverride, setCompileOverride] = useState<CompileJob | null>(null);
   const [pdfNonce, setPdfNonce] = useState(0);
-  const [newFilePath, setNewFilePath] = useState("");
   const [renaming, setRenaming] = useState(false);
   const [projectName, setProjectName] = useState("");
 
@@ -30,6 +29,11 @@ export function ProjectEditorPage() {
     queryFn: () => api.listFiles(projectId)
   });
 
+  const foldersQuery = useQuery({
+    queryKey: ["project-folders", projectId],
+    queryFn: () => api.listFolders(projectId)
+  });
+
   const latestCompileQuery = useQuery({
     queryKey: ["latest-compile", projectId],
     queryFn: () => api.latestCompile(projectId)
@@ -37,6 +41,7 @@ export function ProjectEditorPage() {
 
   const project = projectQuery.data ?? null;
   const files = filesQuery.data ?? [];
+  const folders = foldersQuery.data ?? [];
   const compileJob = compileOverride ?? latestCompileQuery.data ?? null;
 
   useEffect(() => {
@@ -79,9 +84,22 @@ export function ProjectEditorPage() {
   const createFileMutation = useMutation({
     mutationFn: (path: string) => api.createFile(projectId, path),
     onSuccess: async (file) => {
-      setNewFilePath("");
       await queryClient.invalidateQueries({ queryKey: ["project-files", projectId] });
       await openFile(file);
+    }
+  });
+
+  const renameFileMutation = useMutation({
+    mutationFn: ({ fileId, path }: { fileId: string; path: string }) => api.renameFile(projectId, fileId, path),
+    onSuccess: async (file) => {
+      await queryClient.invalidateQueries({ queryKey: ["project-files", projectId] });
+      queryClient.setQueryData(["project-file", projectId, file.id], undefined);
+      if (activeFile?.id === file.id) {
+        const nextFile = await api.getFile(projectId, file.id);
+        queryClient.setQueryData(["project-file", projectId, file.id], nextFile);
+        setActiveFile(nextFile);
+        setContent(nextFile.content);
+      }
     }
   });
 
@@ -89,6 +107,35 @@ export function ProjectEditorPage() {
     mutationFn: (fileId: string) => api.deleteFile(projectId, fileId),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["project-files", projectId] });
+    }
+  });
+
+  const createFolderMutation = useMutation({
+    mutationFn: (path: string) => api.createFolder(projectId, path),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] });
+    }
+  });
+
+  const renameFolderMutation = useMutation({
+    mutationFn: ({ folderId, path }: { folderId: string; path: string }) => api.renameFolder(projectId, folderId, path),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
+        queryClient.invalidateQueries({ queryKey: ["project-files", projectId] })
+      ]);
+      setActiveFile(null);
+      setContent("");
+    }
+  });
+
+  const deleteFolderMutation = useMutation({
+    mutationFn: (folderId: string) => api.deleteFolder(projectId, folderId),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
+        queryClient.invalidateQueries({ queryKey: ["project-files", projectId] })
+      ]);
     }
   });
 
@@ -138,14 +185,37 @@ export function ProjectEditorPage() {
     setSaveState("idle");
   };
 
-  const createFile = async () => {
-    if (!newFilePath.trim()) return;
-    await createFileMutation.mutateAsync(newFilePath);
+  const createFile = async (path: string) => {
+    if (!path.trim()) return;
+    await createFileMutation.mutateAsync(path);
+  };
+
+  const createFolder = async (path: string) => {
+    if (!path.trim()) return;
+    await createFolderMutation.mutateAsync(path);
+  };
+
+  const renameFile = async (file: ProjectFile, path: string) => {
+    if (!path.trim()) return;
+    await renameFileMutation.mutateAsync({ fileId: file.id, path });
+  };
+
+  const renameFolder = async (folder: ProjectFolder, path: string) => {
+    if (!path.trim()) return;
+    await renameFolderMutation.mutateAsync({ folderId: folder.id, path });
   };
 
   const deleteFile = async (file: ProjectFile) => {
     await deleteFileMutation.mutateAsync(file.id);
     if (activeFile?.id === file.id) {
+      setActiveFile(null);
+      setContent("");
+    }
+  };
+
+  const deleteFolder = async (folder: ProjectFolder) => {
+    await deleteFolderMutation.mutateAsync(folder.id);
+    if (activeFile?.path.startsWith(`${folder.path}/`)) {
       setActiveFile(null);
       setContent("");
     }
@@ -166,7 +236,7 @@ export function ProjectEditorPage() {
     return "Not compiled";
   }, [compileJob, compileMutation.isPending]);
 
-  const loadError = projectQuery.error ?? filesQuery.error;
+  const loadError = projectQuery.error ?? filesQuery.error ?? foldersQuery.error;
   if (loadError) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-background p-4">
@@ -210,12 +280,15 @@ export function ProjectEditorPage() {
       <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[260px_minmax(0,1fr)]">
         <FileSidebar
           files={files}
+          folders={folders}
           activeFile={activeFile}
-          newFilePath={newFilePath}
-          onNewFilePathChange={setNewFilePath}
-          onCreateFile={() => void createFile()}
+          onCreateFile={(path) => void createFile(path)}
+          onCreateFolder={(path) => void createFolder(path)}
+          onRenameFile={(file, path) => void renameFile(file, path)}
+          onRenameFolder={(folder, path) => void renameFolder(folder, path)}
           onOpenFile={(file) => void openFile(file)}
           onDeleteFile={(file) => void deleteFile(file)}
+          onDeleteFolder={(folder) => void deleteFolder(folder)}
         />
         <EditorLayout
           layout={layout}
