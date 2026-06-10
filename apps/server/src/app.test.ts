@@ -201,4 +201,36 @@ describe("compile", () => {
     expect(response.json<{ status: string; stderr: string }>().status).toBe("success");
     expect(response.json<{ stderr: string }>().stderr).toContain("used tectonic");
   });
+
+  it("requests SyncTeX data and resolves PDF text back to source", async () => {
+    const argsPath = path.join(tmpDir, "latexmk-args.txt");
+    const fakeLatexmk = path.join(tmpDir, "fake-latexmk");
+    await fs.writeFile(
+      fakeLatexmk,
+      `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(argsPath)}\nprintf '%s' fake-pdf > main.pdf\n`,
+      "utf8"
+    );
+    await fs.chmod(fakeLatexmk, 0o755);
+    config.latexmkBin = fakeLatexmk;
+
+    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Source lookup" } });
+    const project = projectResponse.json<{ id: string }>();
+
+    const compileResponse = await app.inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
+    expect(compileResponse.statusCode).toBe(200);
+    await expect(fs.readFile(argsPath, "utf8")).resolves.toContain("-synctex=1");
+
+    const sourceResponse = await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/pdf/source`,
+      payload: { page: 1, x: 100, y: 100, text: "Fresh Underleaf Article" }
+    });
+
+    expect(sourceResponse.statusCode).toBe(200);
+    expect(sourceResponse.json<{ path: string; line: number; source: string }>()).toMatchObject({
+      path: "main.tex",
+      line: 5,
+      source: "text"
+    });
+  });
 });

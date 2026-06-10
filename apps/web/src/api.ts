@@ -38,6 +38,14 @@ export type CompileJob = {
   updatedAt: string;
 };
 
+export type PdfSourceLocation = {
+  fileId: string;
+  path: string;
+  line: number;
+  column: number;
+  source: "synctex" | "text";
+};
+
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:3001";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -135,5 +143,11 @@ export const api = {
   },
   latestCompile(projectId: string) {
     return request<CompileJob | null>(`/api/projects/${projectId}/compile/latest`);
+  },
+  locatePdfSource(projectId: string, input: { page: number; x: number; y: number; text?: string }) {
+    return request<PdfSourceLocation | null>(`/api/projects/${projectId}/pdf/source`, {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
   }
 };

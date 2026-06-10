@@ -12,16 +12,19 @@ export function PdfPreviewPane({
   projectId,
   compileJob,
   pdfNonce,
-  onReload
+  onReload,
+  onSourceLocated
 }: {
   projectId: string;
   compileJob: CompileJob | null;
   pdfNonce: number;
   onReload: () => void;
+  onSourceLocated: (location: { fileId: string; line: number; column: number }) => void;
 }) {
   const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sourceStatus, setSourceStatus] = useState<string | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [scale, setScale] = useState(0.75);
 
@@ -63,10 +66,28 @@ export function PdfPreviewPane({
   const totalPages = document?.numPages ?? 0;
   const visiblePage = Math.min(pageNumber, Math.max(totalPages, 1));
 
+  const locateSource = async (input: { page: number; x: number; y: number; text?: string }) => {
+    setSourceStatus("Finding source...");
+    try {
+      const location = await api.locatePdfSource(projectId, input);
+      if (!location) {
+        setSourceStatus("No source match found");
+        return;
+      }
+      onSourceLocated(location);
+      setSourceStatus(`${location.path}:${location.line}`);
+    } catch (err) {
+      setSourceStatus(err instanceof Error ? err.message : "Source lookup failed");
+    }
+  };
+
   return (
     <div className="flex min-h-0 flex-col bg-[#e9edf2]">
       <div className="flex h-10 shrink-0 items-center justify-between border-b border-border bg-white px-3">
-        <span className="text-sm font-medium">PDF Preview</span>
+        <div className="min-w-0">
+          <span className="text-sm font-medium">PDF Preview</span>
+          {sourceStatus && <span className="ml-2 hidden truncate text-xs text-muted-foreground sm:inline">{sourceStatus}</span>}
+        </div>
         <div className="flex items-center gap-1">
           {document && (
             <>
@@ -120,7 +141,7 @@ export function PdfPreviewPane({
           {error && <div className="rounded-md bg-destructive p-4 text-sm text-destructive-foreground">{error}</div>}
           {document && !loading && (
             <div className="mx-auto flex w-fit min-w-0 flex-col items-center">
-              <PdfPageCanvas document={document} pageNumber={visiblePage} scale={scale} />
+              <PdfPageCanvas document={document} pageNumber={visiblePage} scale={scale} onSourceRequest={(input) => void locateSource(input)} />
             </div>
           )}
         </div>

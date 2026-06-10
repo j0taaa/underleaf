@@ -18,6 +18,7 @@ export function ProjectEditorPage() {
   const [pdfNonce, setPdfNonce] = useState(0);
   const [renaming, setRenaming] = useState(false);
   const [projectName, setProjectName] = useState("");
+  const [sourceTarget, setSourceTarget] = useState<{ fileId: string; line: number; column: number; nonce: number } | null>(null);
 
   const projectQuery = useQuery({
     queryKey: ["project", projectId],
@@ -183,6 +184,7 @@ export function ProjectEditorPage() {
     setActiveFile(nextFile);
     setContent(nextFile.content);
     setSaveState("idle");
+    return nextFile;
   };
 
   const createFile = async (path: string) => {
@@ -227,6 +229,14 @@ export function ProjectEditorPage() {
 
   const renameProject = async () => {
     await renameProjectMutation.mutateAsync(projectName);
+  };
+
+  const showPdfSource = async (location: { fileId: string; line: number; column: number }) => {
+    const file = files.find((item) => item.id === location.fileId);
+    if (!file) return;
+    await openFile(file);
+    setSourceTarget({ ...location, nonce: Date.now() });
+    if (layout === "pdf") setLayout("split");
   };
 
   const statusText = useMemo(() => {
@@ -298,8 +308,10 @@ export function ProjectEditorPage() {
           saveState={saveState}
           compileJob={compileJob}
           pdfNonce={pdfNonce}
+          sourceTarget={sourceTarget}
           onContentChange={setContent}
           onPdfReload={() => setPdfNonce(Date.now())}
+          onPdfSourceLocated={(location) => void showPdfSource(location)}
         />
       </div>
     </main>

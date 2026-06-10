@@ -12,8 +12,10 @@ export function EditorLayout({
   saveState,
   compileJob,
   pdfNonce,
+  sourceTarget,
   onContentChange,
-  onPdfReload
+  onPdfReload,
+  onPdfSourceLocated
 }: {
   layout: LayoutMode;
   projectId: string;
@@ -22,8 +24,10 @@ export function EditorLayout({
   saveState: SaveState;
   compileJob: CompileJob | null;
   pdfNonce: number;
+  sourceTarget: { line: number; column: number; nonce: number } | null;
   onContentChange: (content: string) => void;
   onPdfReload: () => void;
+  onPdfSourceLocated: (location: { fileId: string; line: number; column: number }) => void;
 }) {
   return (
     <section
@@ -34,12 +38,8 @@ export function EditorLayout({
         layout === "pdf" && "grid-cols-1"
       )}
     >
-      {layout !== "pdf" && (
-        <SourceEditorPane activeFile={activeFile} content={content} saveState={saveState} onContentChange={onContentChange} />
-      )}
-      {layout !== "editor" && (
-        <PdfPreviewPane projectId={projectId} compileJob={compileJob} pdfNonce={pdfNonce} onReload={onPdfReload} />
-      )}
+      {layout !== "pdf" && <SourceEditorPane activeFile={activeFile} content={content} saveState={saveState} sourceTarget={sourceTarget} onContentChange={onContentChange} />}
+      {layout !== "editor" && <PdfPreviewPane projectId={projectId} compileJob={compileJob} pdfNonce={pdfNonce} onReload={onPdfReload} onSourceLocated={onPdfSourceLocated} />}
     </section>
   );
 }

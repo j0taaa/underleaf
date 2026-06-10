@@ -14,6 +14,7 @@ type UpdateProjectBody = { name?: string };
 type CreateFileBody = { path?: string; content?: string };
 type UpdateFileBody = { content?: string };
 type RenamePathBody = { path?: string };
+type PdfSourceBody = { page?: number; x?: number; y?: number; text?: string };
 
 export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance {
   const app = Fastify({ logger: true });
@@ -241,6 +242,28 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
     return reply.type("application/pdf").send(await fs.readFile(absolutePdf));
   });
 
+  app.post<{ Params: { projectId: string }; Body: PdfSourceBody }>("/api/projects/:projectId/pdf/source", async (request, reply) => {
+    const latest = db.latestCompileJob(request.params.projectId);
+    if (!latest?.pdfPath || latest.status !== "success") return reply.code(404).send({ message: "PDF not found" });
+
+    const page = Number(request.body.page);
+    const x = Number(request.body.x);
+    const y = Number(request.body.y);
+    if (!Number.isFinite(page) || page < 1 || !Number.isFinite(x) || !Number.isFinite(y)) {
+      return reply.code(400).send({ message: "Invalid PDF source position" });
+    }
+
+    const root = path.resolve(projectRoot(config.dataDir, request.params.projectId));
+    const absolutePdf = path.resolve(latest.pdfPath);
+    if (!absolutePdf.startsWith(root)) return reply.code(403).send({ message: "PDF path is outside project" });
+
+    const synctexLocation = await locateSourceWithSynctex(db, request.params.projectId, root, absolutePdf, page, x, y);
+    if (synctexLocation) return synctexLocation;
+
+    const textLocation = await locateSourceByText(db, request.params.projectId, root, request.body.text ?? "");
+    return textLocation;
+  });
+
   return app;
 }
 
@@ -285,20 +308,20 @@ async function runCompile(db: UnderleafDb, config: ServerConfig, projectId: stri
 
 async function spawnCompiler(config: ServerConfig, cwd: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
   if (config.latexEngine === "latexmk") {
-    return spawnCommand(config.latexmkBin, ["-pdf", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", "main.tex"], cwd);
+    return spawnCommand(config.latexmkBin, ["-pdf", "-synctex=1", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", "main.tex"], cwd);
   }
 
   if (config.latexEngine === "tectonic") {
-    return spawnCommand(config.tectonicBin, ["--keep-logs", "main.tex"], cwd);
+    return spawnCommand(config.tectonicBin, ["--keep-logs", "--keep-intermediates", "--synctex", "main.tex"], cwd);
   }
 
   try {
-    return await spawnCommand(config.latexmkBin, ["-pdf", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", "main.tex"], cwd);
+    return await spawnCommand(config.latexmkBin, ["-pdf", "-synctex=1", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", "main.tex"], cwd);
   } catch (error) {
     if (!isMissingCommandError(error)) throw error;
 
     try {
-      const tectonicResult = await spawnCommand(config.tectonicBin, ["--keep-logs", "main.tex"], cwd);
+      const tectonicResult = await spawnCommand(config.tectonicBin, ["--keep-logs", "--keep-intermediates", "--synctex", "main.tex"], cwd);
       tectonicResult.stderr = [
         `latexmk was not found, so Underleaf used tectonic (${config.tectonicBin}) instead.`,
         tectonicResult.stderr
@@ -335,6 +358,76 @@ function hasFileAncestor(db: UnderleafDb, projectId: string, itemPath: string): 
     if (db.getFileByPath(projectId, parts.slice(0, index).join("/"))) return true;
   }
   return false;
+}
+
+async function locateSourceWithSynctex(
+  db: UnderleafDb,
+  projectId: string,
+  root: string,
+  pdfPath: string,
+  page: number,
+  x: number,
+  y: number
+): Promise<{ fileId: string; path: string; line: number; column: number; source: "synctex" } | null> {
+  try {
+    const result = await spawnCommand("synctex", ["edit", "-o", `${page}:${x}:${y}:${pdfPath}`], root);
+    if (result.code !== 0) return null;
+
+    const input = result.stdout.match(/^Input:(.+)$/m)?.[1]?.trim();
+    const line = Number(result.stdout.match(/^Line:(\d+)$/m)?.[1]);
+    const column = Number(result.stdout.match(/^Column:(\d+)$/m)?.[1]);
+    if (!input || !Number.isFinite(line) || line < 1) return null;
+
+    const absoluteInput = path.resolve(root, input);
+    if (!absoluteInput.startsWith(root)) return null;
+
+    const relativePath = normalizeProjectPath(path.relative(root, absoluteInput).replaceAll(path.sep, "/"));
+    const file = db.getFileByPath(projectId, relativePath);
+    if (!file) return null;
+
+    return { fileId: file.id, path: file.path, line, column: Number.isFinite(column) && column > 0 ? column : 1, source: "synctex" };
+  } catch (error) {
+    if (isMissingCommandError(error)) return null;
+    return null;
+  }
+}
+
+async function locateSourceByText(
+  db: UnderleafDb,
+  projectId: string,
+  root: string,
+  text: string
+): Promise<{ fileId: string; path: string; line: number; column: number; source: "text" } | null> {
+  const needle = normalizeSearchText(text);
+  if (needle.length < 3) return null;
+
+  for (const file of db.listFiles(projectId)) {
+    if (!file.path.endsWith(".tex") && !file.path.endsWith(".sty") && !file.path.endsWith(".cls")) continue;
+    const absoluteFile = path.resolve(root, normalizeProjectPath(file.path));
+    if (!absoluteFile.startsWith(root)) continue;
+
+    const content = await fs.readFile(absoluteFile, "utf8").catch(() => "");
+    const lines = content.split(/\r?\n/);
+    for (let index = 0; index < lines.length; index += 1) {
+      const readableLine = normalizeSearchText(stripLatexMarkup(lines[index]));
+      if (readableLine.includes(needle)) {
+        return { fileId: file.id, path: file.path, line: index + 1, column: Math.max(1, lines[index].toLowerCase().indexOf(text.toLowerCase()) + 1), source: "text" };
+      }
+    }
+  }
+
+  return null;
+}
+
+function stripLatexMarkup(line: string): string {
+  return line
+    .replace(/\\[A-Za-z]+\*?(?:\[[^\]]*])?\{([^{}]*)\}/g, " $1 ")
+    .replace(/\\[A-Za-z]+\*?/g, " ")
+    .replace(/[{}$]/g, " ");
+}
+
+function normalizeSearchText(value: string): string {
+  return value.toLowerCase().replace(/\\[a-z]+\*?/g, " ").replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ");
 }
 
 function spawnCommand(bin: string, args: string[], cwd: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
