@@ -1,4 +1,5 @@
 import cors from "@fastify/cors";
+import multipart from "@fastify/multipart";
 import Fastify, { type FastifyInstance } from "fastify";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -21,6 +22,12 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
 
   app.register(cors, {
     origin: config.webOrigin
+  });
+  app.register(multipart, {
+    limits: {
+      fileSize: 50 * 1024 * 1024,
+      files: 100
+    }
   });
 
   app.get("/api/health", async () => ({ ok: true }));
@@ -151,6 +158,44 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
     ensureFolderMetadata(db, request.params.projectId, path.posix.dirname(safePath), now);
     db.createFile(file);
     return reply.code(201).send(file);
+  });
+
+  app.post<{ Params: { projectId: string } }>("/api/projects/:projectId/files/upload", async (request, reply) => {
+    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    if (!request.isMultipart()) return reply.code(415).send({ message: "Expected multipart upload" });
+
+    const requestedPaths = new Map<string, string>();
+    const uploadedFiles = [];
+
+    for await (const part of request.parts()) {
+      if (part.type === "field" && part.fieldname.startsWith("path-")) {
+        requestedPaths.set(part.fieldname.slice("path-".length), String(part.value ?? ""));
+        continue;
+      }
+
+      if (part.type === "file" && part.fieldname.startsWith("file-")) {
+        const index = part.fieldname.slice("file-".length);
+        const requestedPath = requestedPaths.get(index) || part.filename;
+        let safePath: string;
+        try {
+          safePath = resolveAvailableUploadPath(db, request.params.projectId, requestedPath);
+        } catch {
+          return reply.code(400).send({ message: "Invalid upload path" });
+        }
+        const buffer = await part.toBuffer();
+        const now = new Date().toISOString();
+        const file = { id: nanoid(), projectId: request.params.projectId, path: safePath, createdAt: now, updatedAt: now };
+
+        await ensureParentDir(projectFilePath(config.dataDir, request.params.projectId, safePath));
+        await fs.writeFile(projectFilePath(config.dataDir, request.params.projectId, safePath), buffer);
+        ensureFolderMetadata(db, request.params.projectId, path.posix.dirname(safePath), now);
+        db.createFile(file);
+        uploadedFiles.push(file);
+      }
+    }
+
+    if (uploadedFiles.length === 0) return reply.code(400).send({ message: "No files uploaded" });
+    return reply.code(201).send(uploadedFiles);
   });
 
   app.post<{ Params: { projectId: string }; Body: RenamePathBody }>("/api/projects/:projectId/folders", async (request, reply) => {
@@ -358,6 +403,22 @@ function hasFileAncestor(db: UnderleafDb, projectId: string, itemPath: string): 
     if (db.getFileByPath(projectId, parts.slice(0, index).join("/"))) return true;
   }
   return false;
+}
+
+function resolveAvailableUploadPath(db: UnderleafDb, projectId: string, requestedPath: string): string {
+  const safePath = normalizeProjectPath(requestedPath || "upload.bin");
+  if (hasFileAncestor(db, projectId, safePath)) throw new Error("Parent path is a file");
+  if (!db.getFileByPath(projectId, safePath) && !db.getFolderByPath(projectId, safePath)) return safePath;
+
+  const parent = path.posix.dirname(safePath);
+  const parsed = path.posix.parse(safePath);
+  for (let index = 1; index < 1000; index += 1) {
+    const candidateName = `${parsed.name}-${index}${parsed.ext}`;
+    const candidate = parent === "." ? candidateName : `${parent}/${candidateName}`;
+    if (!db.getFileByPath(projectId, candidate) && !db.getFolderByPath(projectId, candidate)) return candidate;
+  }
+
+  throw new Error("Unable to find available upload path");
 }
 
 async function locateSourceWithSynctex(

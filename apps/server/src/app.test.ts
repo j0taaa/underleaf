@@ -166,6 +166,49 @@ describe("projects and files", () => {
     });
     expect(folderUnderFileResponse.statusCode).toBe(409);
   });
+
+  it("uploads files and assigns duplicate-safe names", async () => {
+    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Uploads" } });
+    const project = projectResponse.json<{ id: string }>();
+    const boundary = "underleaf-test-boundary";
+    const uploadBody = [
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="path-0"',
+      "",
+      "figures/logo.png",
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="file-0"; filename="logo.png"',
+      "Content-Type: image/png",
+      "",
+      "PNGDATA",
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="path-1"',
+      "",
+      "figures/logo.png",
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="file-1"; filename="logo.png"',
+      "Content-Type: image/png",
+      "",
+      "PNGDATA2",
+      `--${boundary}--`,
+      ""
+    ].join("\r\n");
+
+    const uploadResponse = await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/files/upload`,
+      headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+      payload: uploadBody
+    });
+
+    expect(uploadResponse.statusCode).toBe(201);
+    expect(uploadResponse.json<Array<{ path: string }>>()).toEqual([
+      expect.objectContaining({ path: "figures/logo.png" }),
+      expect.objectContaining({ path: "figures/logo-1.png" })
+    ]);
+    await expect(fs.readFile(path.join(tmpDir, "projects", project.id, "figures", "logo.png"), "utf8")).resolves.toBe("PNGDATA");
+    await expect(fs.readFile(path.join(tmpDir, "projects", project.id, "figures", "logo-1.png"), "utf8")).resolves.toBe("PNGDATA2");
+  });
 });
 
 describe("compile", () => {

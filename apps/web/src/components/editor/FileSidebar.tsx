@@ -9,6 +9,7 @@ import {
   Pencil,
   Check,
   Trash2,
+  Upload,
   X
 } from "lucide-react";
 import type React from "react";
@@ -35,7 +36,8 @@ export function FileSidebar({
   onRenameFolder,
   onOpenFile,
   onDeleteFile,
-  onDeleteFolder
+  onDeleteFolder,
+  onUploadItems
 }: {
   files: ProjectFile[];
   folders: ProjectFolder[];
@@ -47,6 +49,7 @@ export function FileSidebar({
   onOpenFile: (file: ProjectFile) => void;
   onDeleteFile: (file: ProjectFile) => void;
   onDeleteFolder: (folder: ProjectFolder) => void;
+  onUploadItems: (dataTransfer: DataTransfer, parentPath: string) => void;
 }) {
   const tree = useMemo(() => buildTree(files, folders), [files, folders]);
   const folderByPath = useMemo(() => new Map(folders.map((folder) => [folder.path, folder])), [folders]);
@@ -55,6 +58,7 @@ export function FileSidebar({
   const [draftName, setDraftName] = useState("");
   const [rename, setRename] = useState<RenameAction>(null);
   const [renameName, setRenameName] = useState("");
+  const [draggingRoot, setDraggingRoot] = useState(false);
 
   const startDraft = (kind: "file" | "folder", parentPath = "") => {
     setDraft({ kind, parentPath });
@@ -95,7 +99,32 @@ export function FileSidebar({
   };
 
   return (
-    <aside className="flex min-h-0 flex-col border-b border-border bg-[#f6f8fa] md:border-b-0 md:border-r">
+    <aside
+      className={cn("relative flex min-h-0 flex-col border-b border-border bg-[#f6f8fa] md:border-b-0 md:border-r", draggingRoot && "ring-2 ring-inset ring-primary")}
+      onDragEnter={(event) => {
+        if (event.dataTransfer.types.includes("Files")) setDraggingRoot(true);
+      }}
+      onDragOver={(event) => {
+        if (!event.dataTransfer.types.includes("Files")) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDraggingRoot(false);
+      }}
+      onDrop={(event) => {
+        if (!event.dataTransfer.types.includes("Files")) return;
+        event.preventDefault();
+        setDraggingRoot(false);
+        onUploadItems(event.dataTransfer, "");
+      }}
+    >
+      {draggingRoot && (
+        <div className="pointer-events-none absolute inset-x-2 bottom-2 z-10 flex items-center gap-2 rounded border border-primary/30 bg-white px-2 py-1.5 text-xs text-muted-foreground shadow-sm">
+          <Upload className="h-3.5 w-3.5 text-primary" />
+          Drop files to add them
+        </div>
+      )}
       <div className="flex h-9 items-center justify-between border-b border-border px-2">
         <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Explorer</div>
         <div className="flex items-center gap-0.5">
@@ -147,6 +176,7 @@ export function FileSidebar({
             onDeleteFile={onDeleteFile}
             onDeleteFolder={onDeleteFolder}
             onOpenFile={onOpenFile}
+            onUploadItems={onUploadItems}
           />
         ))}
       </div>
@@ -175,6 +205,7 @@ function ExplorerNodeRow({
   onDeleteFile,
   onDeleteFolder,
   onOpenFile,
+  onUploadItems,
   depth = 0
 }: {
   node: ExplorerNode;
@@ -197,8 +228,11 @@ function ExplorerNodeRow({
   onDeleteFile: (file: ProjectFile) => void;
   onDeleteFolder: (folder: ProjectFolder) => void;
   onOpenFile: (file: ProjectFile) => void;
+  onUploadItems: (dataTransfer: DataTransfer, parentPath: string) => void;
   depth?: number;
 }) {
+  const [isDropTarget, setIsDropTarget] = useState(false);
+
   if (node.kind === "file") {
     const isRenaming = rename?.kind === "file" && rename.id === node.id;
     if (isRenaming) {
@@ -249,7 +283,32 @@ function ExplorerNodeRow({
 
   return (
     <div>
-      <div className="group flex h-7 items-center gap-1 pr-1 hover:bg-muted" style={{ paddingLeft: depth * 14 + 4 }}>
+      <div
+        className={cn("group flex h-7 items-center gap-1 pr-1 hover:bg-muted", isDropTarget && "bg-primary/10")}
+        style={{ paddingLeft: depth * 14 + 4 }}
+        onDragEnter={(event) => {
+          if (!event.dataTransfer.types.includes("Files")) return;
+          event.stopPropagation();
+          setIsDropTarget(true);
+        }}
+        onDragOver={(event) => {
+          if (!event.dataTransfer.types.includes("Files")) return;
+          event.preventDefault();
+          event.stopPropagation();
+          event.dataTransfer.dropEffect = "copy";
+        }}
+        onDragLeave={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setIsDropTarget(false);
+        }}
+        onDrop={(event) => {
+          if (!event.dataTransfer.types.includes("Files")) return;
+          event.preventDefault();
+          event.stopPropagation();
+          setIsDropTarget(false);
+          setOpenFolders((current) => new Set(current).add(node.path));
+          onUploadItems(event.dataTransfer, node.path);
+        }}
+      >
         <button
           className="flex min-w-0 flex-1 items-center gap-1 text-left"
           onClick={() => {
@@ -318,6 +377,7 @@ function ExplorerNodeRow({
               onDeleteFile={onDeleteFile}
               onDeleteFolder={onDeleteFolder}
               onOpenFile={onOpenFile}
+              onUploadItems={onUploadItems}
             />
           ))}
         </div>

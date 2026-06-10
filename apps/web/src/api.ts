@@ -50,7 +50,7 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:3001";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
-  if (init?.body && !headers.has("Content-Type")) {
+  if (init?.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
 
@@ -112,6 +112,17 @@ export const api = {
     return request<ProjectFile>(`/api/projects/${projectId}/files`, {
       method: "POST",
       body: JSON.stringify({ path, content: "" })
+    });
+  },
+  uploadFiles(projectId: string, uploads: Array<{ file: File; path: string }>) {
+    const formData = new FormData();
+    uploads.forEach((upload, index) => {
+      formData.append(`path-${index}`, upload.path);
+      formData.append(`file-${index}`, upload.file, upload.file.name);
+    });
+    return request<ProjectFile[]>(`/api/projects/${projectId}/files/upload`, {
+      method: "POST",
+      body: formData
     });
   },
   renameFile(projectId: string, fileId: string, path: string) {

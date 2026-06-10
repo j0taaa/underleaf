@@ -7,6 +7,24 @@ import { EditorLayout } from "../components/editor/EditorLayout";
 import { FileSidebar } from "../components/editor/FileSidebar";
 import type { LayoutMode, SaveState } from "../types/editor";
 
+type UploadItem = { file: File; path: string };
+type UploadFileSystemEntry = {
+  name: string;
+  isFile: boolean;
+  isDirectory: boolean;
+};
+type UploadFileSystemFileEntry = UploadFileSystemEntry & {
+  file: (success: (file: File) => void, failure?: (error: DOMException) => void) => void;
+};
+type UploadFileSystemDirectoryEntry = UploadFileSystemEntry & {
+  createReader: () => {
+    readEntries: (success: (entries: UploadFileSystemEntry[]) => void, failure?: (error: DOMException) => void) => void;
+  };
+};
+type DataTransferItemWithEntry = DataTransferItem & {
+  webkitGetAsEntry?: () => UploadFileSystemEntry | null;
+};
+
 export function ProjectEditorPage() {
   const { projectId } = useParams({ from: "/projects/$projectId" });
   const queryClient = useQueryClient();
@@ -140,6 +158,16 @@ export function ProjectEditorPage() {
     }
   });
 
+  const uploadFilesMutation = useMutation({
+    mutationFn: (uploads: UploadItem[]) => api.uploadFiles(projectId, uploads),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
+        queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] })
+      ]);
+    }
+  });
+
   const compileMutation = useMutation({
     mutationFn: () => api.compile(projectId),
     onSuccess: async (job) => {
@@ -175,6 +203,22 @@ export function ProjectEditorPage() {
 
     return () => window.clearTimeout(timer);
   }, [activeFile, content, projectId, saveFileMutation]);
+
+  useEffect(() => {
+    const onPaste = (event: ClipboardEvent) => {
+      const clipboardData = event.clipboardData;
+      if (!clipboardData || clipboardData.files.length === 0) return;
+      event.preventDefault();
+      const uploads = Array.from(clipboardData.files).map((file, index) => ({
+        file,
+        path: pastedFileName(file, index)
+      }));
+      void uploadFiles(uploads);
+    };
+
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  });
 
   const openFile = async (file: ProjectFile) => {
     const nextFile = await queryClient.fetchQuery({
@@ -221,6 +265,16 @@ export function ProjectEditorPage() {
       setActiveFile(null);
       setContent("");
     }
+  };
+
+  const uploadFiles = async (uploads: UploadItem[]) => {
+    if (uploads.length === 0) return;
+    await uploadFilesMutation.mutateAsync(uploads);
+  };
+
+  const uploadDroppedItems = async (dataTransfer: DataTransfer, parentPath: string) => {
+    const uploads = await uploadsFromDataTransfer(dataTransfer, parentPath);
+    await uploadFiles(uploads);
   };
 
   const compile = async () => {
@@ -299,6 +353,7 @@ export function ProjectEditorPage() {
           onOpenFile={(file) => void openFile(file)}
           onDeleteFile={(file) => void deleteFile(file)}
           onDeleteFolder={(folder) => void deleteFolder(folder)}
+          onUploadItems={(dataTransfer, parentPath) => void uploadDroppedItems(dataTransfer, parentPath)}
         />
         <EditorLayout
           layout={layout}
@@ -316,4 +371,73 @@ export function ProjectEditorPage() {
       </div>
     </main>
   );
+}
+
+async function uploadsFromDataTransfer(dataTransfer: DataTransfer, parentPath: string): Promise<UploadItem[]> {
+  const entries = Array.from(dataTransfer.items)
+    .map((item): UploadFileSystemEntry | null => (item as unknown as DataTransferItemWithEntry).webkitGetAsEntry?.() ?? null)
+    .filter((entry): entry is UploadFileSystemEntry => entry !== null);
+
+  if (entries.length > 0) {
+    const nestedUploads = await Promise.all(entries.map((entry) => uploadsFromEntry(entry, parentPath)));
+    return nestedUploads.flat();
+  }
+
+  return Array.from(dataTransfer.files).map((file) => ({
+    file,
+    path: joinUploadPath(parentPath, file.webkitRelativePath || file.name)
+  }));
+}
+
+async function uploadsFromEntry(entry: UploadFileSystemEntry, parentPath: string): Promise<UploadItem[]> {
+  if (entry.isFile) {
+    const file = await fileFromEntry(entry as UploadFileSystemFileEntry);
+    return [{ file, path: joinUploadPath(parentPath, entry.name) }];
+  }
+
+  if (!entry.isDirectory) return [];
+
+  const directory = entry as UploadFileSystemDirectoryEntry;
+  const children = await readDirectoryEntries(directory);
+  const nestedUploads = await Promise.all(children.map((child) => uploadsFromEntry(child, joinUploadPath(parentPath, directory.name))));
+  return nestedUploads.flat();
+}
+
+function fileFromEntry(entry: UploadFileSystemFileEntry): Promise<File> {
+  return new Promise((resolve, reject) => entry.file(resolve, reject));
+}
+
+async function readDirectoryEntries(entry: UploadFileSystemDirectoryEntry): Promise<UploadFileSystemEntry[]> {
+  const reader = entry.createReader();
+  const entries: UploadFileSystemEntry[] = [];
+
+  while (true) {
+    const batch = await new Promise<UploadFileSystemEntry[]>((resolve, reject) => reader.readEntries(resolve, reject));
+    if (batch.length === 0) return entries;
+    entries.push(...batch);
+  }
+}
+
+function pastedFileName(file: File, index: number): string {
+  const extension = extensionFromFile(file);
+  const genericNames = new Set(["image.png", "image.jpeg", "image.jpg", "image.gif", "clipboard.png"]);
+  if (file.name && !genericNames.has(file.name.toLowerCase())) return file.name;
+  const suffix = index === 0 ? "" : `-${index + 1}`;
+  return `pasted-${new Date().toISOString().replace(/[:.]/g, "-")}${suffix}${extension}`;
+}
+
+function extensionFromFile(file: File): string {
+  const existing = file.name.match(/\.[A-Za-z0-9]+$/)?.[0];
+  if (existing) return existing;
+  if (file.type === "image/jpeg") return ".jpg";
+  if (file.type === "image/gif") return ".gif";
+  if (file.type === "image/svg+xml") return ".svg";
+  if (file.type === "application/pdf") return ".pdf";
+  return ".png";
+}
+
+function joinUploadPath(parentPath: string, childPath: string): string {
+  const cleanParent = parentPath.replace(/^\/+|\/+$/g, "");
+  const cleanChild = childPath.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  return cleanParent ? `${cleanParent}/${cleanChild}` : cleanChild;
 }
