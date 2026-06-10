@@ -16,7 +16,9 @@ beforeEach(async () => {
   config = getConfig({
     dataDir: tmpDir,
     databaseUrl: path.join(tmpDir, "test.sqlite"),
+    latexEngine: "latexmk",
     latexmkBin: "definitely-missing-latexmk",
+    tectonicBin: "definitely-missing-tectonic",
     webOrigin: "http://localhost:5173",
     port: 0
   });
@@ -92,5 +94,26 @@ describe("compile", () => {
 
     const latest = await app.inject({ method: "GET", url: `/api/projects/${project.id}/compile/latest` });
     expect(latest.json<{ status: string }>().status).toBe("error");
+  });
+
+  it("falls back to tectonic when latexmk is unavailable in auto mode", async () => {
+    const fakeTectonic = path.join(tmpDir, "fake-tectonic");
+    await fs.writeFile(
+      fakeTectonic,
+      "#!/bin/sh\necho tectonic fallback ok\nprintf '%s' fake-pdf > main.pdf\n",
+      "utf8"
+    );
+    await fs.chmod(fakeTectonic, 0o755);
+    config.latexEngine = "auto";
+    config.tectonicBin = fakeTectonic;
+
+    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Fallback" } });
+    const project = projectResponse.json<{ id: string }>();
+
+    const response = await app.inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<{ status: string; stderr: string }>().status).toBe("success");
+    expect(response.json<{ stderr: string }>().stderr).toContain("used tectonic");
   });
 });

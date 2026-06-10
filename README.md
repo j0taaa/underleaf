@@ -6,7 +6,7 @@ Underleaf is a small, self-hosted LaTeX editor inspired by the Overleaf editing 
 
 - Node.js 22+
 - Corepack or pnpm
-- A local LaTeX toolchain with `latexmk` for PDF compilation
+- A local LaTeX toolchain with `latexmk` or `tectonic` for PDF compilation
 
 ## Getting started
 
@@ -25,6 +25,8 @@ Server environment variables:
 - `DATABASE_URL`: SQLite path. Defaults to `<UNDERLEAF_DATA_DIR>/underleaf.sqlite`.
 - `UNDERLEAF_DATA_DIR`: Project source/PDF storage. Defaults to `.underleaf-data`.
 - `LATEXMK_BIN`: LaTeX compiler binary. Defaults to `latexmk`.
+- `LATEX_ENGINE`: `auto`, `latexmk`, or `tectonic`. Defaults to `auto`.
+- `TECTONIC_BIN`: Tectonic compiler binary. Defaults to `tectonic`.
 - `SERVER_PORT`: API port. Defaults to `3001`.
 - `WEB_ORIGIN`: CORS origin. Defaults to `http://localhost:5173`.
 

@@ -171,7 +171,7 @@ async function runCompile(db: UnderleafDb, config: ServerConfig, projectId: stri
   const startedAt = Date.now();
 
   try {
-    const result = await spawnLatexmk(config.latexmkBin, root);
+    const result = await spawnCompiler(config, root);
     const pdfPath = path.join(root, "main.pdf");
     const hasPdf = await fs.stat(pdfPath).then((stat) => stat.isFile()).catch(() => false);
 
@@ -191,9 +191,43 @@ async function runCompile(db: UnderleafDb, config: ServerConfig, projectId: stri
   return job;
 }
 
-function spawnLatexmk(bin: string, cwd: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+async function spawnCompiler(config: ServerConfig, cwd: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  if (config.latexEngine === "latexmk") {
+    return spawnCommand(config.latexmkBin, ["-pdf", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", "main.tex"], cwd);
+  }
+
+  if (config.latexEngine === "tectonic") {
+    return spawnCommand(config.tectonicBin, ["--keep-logs", "main.tex"], cwd);
+  }
+
+  try {
+    return await spawnCommand(config.latexmkBin, ["-pdf", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", "main.tex"], cwd);
+  } catch (error) {
+    if (!isMissingCommandError(error)) throw error;
+
+    try {
+      const tectonicResult = await spawnCommand(config.tectonicBin, ["--keep-logs", "main.tex"], cwd);
+      tectonicResult.stderr = [
+        `latexmk was not found, so Underleaf used tectonic (${config.tectonicBin}) instead.`,
+        tectonicResult.stderr
+      ].filter(Boolean).join("\n");
+      return tectonicResult;
+    } catch (tectonicError) {
+      if (!isMissingCommandError(tectonicError)) throw tectonicError;
+      throw new Error(
+        `No LaTeX compiler found. Install latexmk or tectonic, or set LATEX_ENGINE plus LATEXMK_BIN/TECTONIC_BIN. Tried '${config.latexmkBin}' and '${config.tectonicBin}'.`
+      );
+    }
+  }
+}
+
+function isMissingCommandError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+function spawnCommand(bin: string, args: string[], cwd: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, ["-pdf", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", "main.tex"], {
+    const child = spawn(bin, args, {
       cwd,
       env: process.env
     });
