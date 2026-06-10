@@ -237,6 +237,53 @@ describe("projects and files", () => {
     ]);
   });
 
+  it("exports and imports project archives", async () => {
+    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Archive Source" } });
+    const project = projectResponse.json<{ id: string }>();
+    const files = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
+    const mainFile = files.find((file) => file.path === "main.tex");
+    expect(mainFile).toBeDefined();
+
+    await app.inject({
+      method: "PUT",
+      url: `/api/projects/${project.id}/files/${mainFile?.id}/content`,
+      payload: { content: "\\documentclass{article}\n\\begin{document}\nExported source\n\\end{document}" }
+    });
+    await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/files`,
+      payload: { path: "chapters/intro.tex", content: "Imported chapter" }
+    });
+
+    const downloadResponse = await app.inject({ method: "GET", url: `/api/projects/${project.id}/download` });
+    expect(downloadResponse.statusCode).toBe(200);
+    expect(downloadResponse.headers["content-type"]).toContain("application/gzip");
+
+    const boundary = "underleaf-import-boundary";
+    const importBody = Buffer.concat([
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="archive-source.tar.gz"\r\nContent-Type: application/gzip\r\n\r\n`),
+      downloadResponse.rawPayload,
+      Buffer.from(`\r\n--${boundary}--\r\n`)
+    ]);
+
+    const importResponse = await app.inject({
+      method: "POST",
+      url: "/api/projects/import?name=Imported%20Archive",
+      headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+      payload: importBody
+    });
+
+    expect(importResponse.statusCode).toBe(201);
+    const importedProject = importResponse.json<{ id: string; name: string }>();
+    expect(importedProject.name).toBe("Imported Archive");
+
+    const importedFiles = (await app.inject({ method: "GET", url: `/api/projects/${importedProject.id}/files` })).json<Array<{ id: string; path: string }>>();
+    expect(importedFiles.map((file) => file.path).sort()).toEqual(["chapters/intro.tex", "main.tex"]);
+    const importedMain = importedFiles.find((file) => file.path === "main.tex");
+    const importedMainResponse = await app.inject({ method: "GET", url: `/api/projects/${importedProject.id}/files/${importedMain?.id}` });
+    expect(importedMainResponse.json<{ content: string }>().content).toContain("Exported source");
+  });
+
   it("creates and restores project snapshots", async () => {
     const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "History" } });
     const project = projectResponse.json<{ id: string }>();

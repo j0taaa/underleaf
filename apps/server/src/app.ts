@@ -2,15 +2,17 @@ import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import Fastify, { type FastifyInstance } from "fastify";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { nanoid } from "nanoid";
 import { type ServerConfig } from "./config.js";
-import { type CompileDiagnosticRow, type CompileJobRow, type FileRow, type FolderRow, type UnderleafDb } from "./db.js";
+import { type CompileDiagnosticRow, type CompileJobRow, type FileRow, type FolderRow, type ProjectRow, type UnderleafDb } from "./db.js";
 import { ensureParentDir, normalizeProjectPath, projectFilePath, projectRoot } from "./paths.js";
 import { resolveTemplate, templates } from "./templates.js";
 
 type CreateProjectBody = { name?: string; template?: string };
+type ImportProjectQuery = { name?: string };
 type UpdateProjectBody = { name?: string };
 type CreateFileBody = { path?: string; content?: string };
 type UpdateFileBody = { content?: string };
@@ -76,6 +78,21 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
     return reply.code(201).send(project);
   });
 
+  app.post<{ Querystring: ImportProjectQuery }>("/api/projects/import", async (request, reply) => {
+    if (!request.isMultipart()) return reply.code(415).send({ message: "Expected multipart upload" });
+
+    const archive = await request.file();
+    if (!archive) return reply.code(400).send({ message: "Archive file is required" });
+
+    const buffer = await archive.toBuffer();
+    try {
+      const project = await importProjectArchive(db, config, buffer, archive.filename, request.query.name);
+      return reply.code(201).send(project);
+    } catch (error) {
+      return reply.code(400).send({ message: error instanceof Error ? error.message : "Unable to import archive" });
+    }
+  });
+
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId", async (request, reply) => {
     const project = db.getProject(request.params.projectId);
     if (!project) return reply.code(404).send({ message: "Project not found" });
@@ -96,6 +113,22 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
     if (!deleted) return reply.code(404).send({ message: "Project not found" });
     await fs.rm(projectRoot(config.dataDir, request.params.projectId), { recursive: true, force: true });
     return reply.code(204).send();
+  });
+
+  app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/download", async (request, reply) => {
+    const project = db.getProject(request.params.projectId);
+    if (!project) return reply.code(404).send({ message: "Project not found" });
+
+    const sourceDir = await createProjectArchiveSource(db, config, project.id);
+    try {
+      const archive = await spawnCommandBuffer("tar", ["-czf", "-", "-C", sourceDir, "."]);
+      return reply
+        .type("application/gzip")
+        .header("Content-Disposition", `attachment; filename="${sanitizeDownloadName(project.name || "project")}.tar.gz"`)
+        .send(archive);
+    } finally {
+      await fs.rm(sourceDir, { recursive: true, force: true });
+    }
   });
 
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/files", async (request, reply) => {
@@ -690,6 +723,151 @@ async function createProjectSnapshot(db: UnderleafDb, config: ServerConfig, proj
   await writeSnapshotManifest(config, manifest);
   db.createSnapshot(snapshot);
   return snapshot;
+}
+
+async function createProjectArchiveSource(db: UnderleafDb, config: ServerConfig, projectId: string): Promise<string> {
+  const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "underleaf-export-"));
+  const root = path.resolve(projectRoot(config.dataDir, projectId));
+
+  for (const file of db.listFiles(projectId)) {
+    const source = path.resolve(projectFilePath(config.dataDir, projectId, file.path));
+    if (!source.startsWith(root)) continue;
+
+    const target = path.join(sourceDir, file.path);
+    await ensureParentDir(target);
+    await fs.copyFile(source, target);
+  }
+
+  return sourceDir;
+}
+
+async function importProjectArchive(db: UnderleafDb, config: ServerConfig, archive: Buffer, filename: string, requestedName: string | undefined): Promise<ProjectRow> {
+  const now = new Date().toISOString();
+  const project: ProjectRow = {
+    id: nanoid(),
+    ownerId: "local-user",
+    name: requestedName?.trim() || archiveProjectName(filename),
+    createdAt: now,
+    updatedAt: now
+  };
+  const importRoot = await fs.mkdtemp(path.join(os.tmpdir(), "underleaf-import-"));
+  const archivePath = path.join(importRoot, filename || "project.tar.gz");
+  const extractRoot = path.join(importRoot, "source");
+
+  try {
+    await fs.mkdir(extractRoot, { recursive: true });
+    await fs.writeFile(archivePath, archive);
+    await extractProjectArchive(archivePath, extractRoot, filename);
+
+    const files = await collectImportedFiles(extractRoot);
+    if (files.length === 0) throw new Error("Archive does not contain any importable files");
+
+    await fs.mkdir(projectRoot(config.dataDir, project.id), { recursive: true });
+    db.createProject(project);
+
+    for (const importedFile of files) {
+      const safePath = normalizeProjectPath(importedFile.path);
+      const target = projectFilePath(config.dataDir, project.id, safePath);
+      const file = { id: nanoid(), projectId: project.id, path: safePath, createdAt: now, updatedAt: now };
+
+      await ensureParentDir(target);
+      await fs.copyFile(importedFile.absolutePath, target);
+      ensureFolderMetadata(db, project.id, path.posix.dirname(safePath), now);
+      db.createFile(file);
+    }
+
+    return project;
+  } catch (error) {
+    if (db.getProject(project.id)) db.deleteProject(project.id);
+    await fs.rm(projectRoot(config.dataDir, project.id), { recursive: true, force: true });
+    throw error;
+  } finally {
+    await fs.rm(importRoot, { recursive: true, force: true });
+  }
+}
+
+async function extractProjectArchive(archivePath: string, extractRoot: string, filename: string): Promise<void> {
+  const lowerName = filename.toLowerCase();
+  if (lowerName.endsWith(".zip")) {
+    const listing = await spawnCommandBuffer("unzip", ["-Z1", archivePath]);
+    validateArchiveEntries(listing.toString("utf8").split(/\r?\n/));
+    await spawnCommandBuffer("unzip", ["-q", archivePath, "-d", extractRoot]);
+    return;
+  }
+
+  if (lowerName.endsWith(".tar.gz") || lowerName.endsWith(".tgz") || lowerName.endsWith(".tar")) {
+    const listArgs = lowerName.endsWith(".tar") ? ["-tf", archivePath] : ["-tzf", archivePath];
+    const extractArgs = lowerName.endsWith(".tar") ? ["-xf", archivePath, "-C", extractRoot] : ["-xzf", archivePath, "-C", extractRoot];
+    const listing = await spawnCommandBuffer("tar", listArgs);
+    validateArchiveEntries(listing.toString("utf8").split(/\r?\n/));
+    await spawnCommandBuffer("tar", extractArgs);
+    return;
+  }
+
+  throw new Error("Archive must be a .zip, .tar, .tar.gz, or .tgz file");
+}
+
+function validateArchiveEntries(entries: string[]): void {
+  for (const entry of entries) {
+    const value = entry.trim();
+    if (!value) continue;
+    const parts = value.replaceAll("\\", "/").split("/");
+    if (path.posix.isAbsolute(value) || parts.includes("..")) throw new Error("Archive contains unsafe paths");
+    const withoutPrefix = stripArchiveRoot(value);
+    normalizeProjectPath(withoutPrefix || "archive-entry");
+  }
+}
+
+async function collectImportedFiles(extractRoot: string): Promise<Array<{ path: string; absolutePath: string }>> {
+  const discovered: Array<{ path: string; absolutePath: string }> = [];
+  const root = path.resolve(extractRoot);
+
+  const walk = async (dir: string) => {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const absolutePath = path.join(dir, entry.name);
+      const relativePath = path.relative(root, absolutePath).replaceAll(path.sep, "/");
+
+      if (entry.isDirectory()) {
+        await walk(absolutePath);
+        continue;
+      }
+
+      if (!entry.isFile()) continue;
+      if (relativePath.split("/").some((part) => part.startsWith(".") || part === "__MACOSX")) continue;
+
+      const safePath = normalizeProjectPath(stripArchiveRoot(relativePath));
+      discovered.push({ path: safePath, absolutePath });
+    }
+  };
+
+  await walk(root);
+
+  const paths = discovered.map((file) => file.path);
+  const commonRoot = commonArchiveRoot(paths);
+  return discovered.map((file) => ({
+    ...file,
+    path: commonRoot ? normalizeProjectPath(file.path.slice(commonRoot.length + 1)) : file.path
+  })).filter((file, index, files) => files.findIndex((candidate) => candidate.path === file.path) === index);
+}
+
+function stripArchiveRoot(entryPath: string): string {
+  return entryPath.replace(/^\.\//, "").replace(/^\/+/, "").replace(/\/+$/, "");
+}
+
+function commonArchiveRoot(paths: string[]): string | null {
+  if (paths.length === 0) return null;
+  const [first, ...rest] = paths;
+  const root = first.split("/")[0];
+  if (!root || !first.includes("/")) return null;
+  return rest.every((filePath) => filePath.startsWith(`${root}/`)) ? root : null;
+}
+
+function archiveProjectName(filename: string): string {
+  return (filename || "Imported Project")
+    .replace(/\.(tar\.gz|tgz|tar|zip)$/i, "")
+    .replace(/[-_]+/g, " ")
+    .trim() || "Imported Project";
 }
 
 async function restoreProjectSnapshot(db: UnderleafDb, config: ServerConfig, projectId: string, snapshotId: string): Promise<void> {

@@ -1,6 +1,6 @@
-import { Trash2 } from "lucide-react";
+import { Download, Trash2 } from "lucide-react";
 import { Link } from "@tanstack/react-router";
-import type { Project } from "../../api";
+import { api, type Project } from "../../api";
 import { Button } from "../ui/button";
 
 export function ProjectList({
@@ -30,6 +30,14 @@ export function ProjectList({
                 <div className="truncate text-sm font-medium">{project.name}</div>
                 <div className="text-xs text-muted-foreground">Updated {new Date(project.updatedAt).toLocaleString()}</div>
               </Link>
+              <a
+                className="inline-flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                href={api.projectDownloadUrl(project.id)}
+                download
+                title="Download project"
+              >
+                <Download className="h-4 w-4" />
+              </a>
               <Button variant="ghost" size="icon" title="Delete project" onClick={() => void onDelete(project.id)}>
                 <Trash2 className="h-4 w-4" />
               </Button>

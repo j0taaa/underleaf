@@ -1,6 +1,6 @@
-import { ChevronLeft, History, LayoutPanelLeft, Maximize2, PanelRightOpen, Pencil, Play } from "lucide-react";
+import { ChevronLeft, Download, History, LayoutPanelLeft, Maximize2, PanelRightOpen, Pencil, Play } from "lucide-react";
 import { Link } from "@tanstack/react-router";
-import type { CompileJob, Project, ProjectFileWithContent } from "../../api";
+import { api, type CompileJob, type Project, type ProjectFileWithContent } from "../../api";
 import type { LayoutMode } from "../../types/editor";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
@@ -76,6 +76,14 @@ export function EditorHeader({
         <span className={cn("hidden text-xs sm:inline", compileJob?.status === "error" ? "text-destructive" : "text-muted-foreground")}>
           {statusText}
         </span>
+        <a
+          className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          href={api.projectDownloadUrl(project.id)}
+          download
+          title="Download project"
+        >
+          <Download className="h-4 w-4" />
+        </a>
         <Button variant="outline" size="sm" title="History" onClick={onHistoryToggle}>
           <History className="h-4 w-4" />
           History

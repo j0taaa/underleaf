@@ -87,9 +87,6 @@ export function ProjectEditorPage() {
   }, [project]);
 
   useEffect(() => {
-    setActiveFile(null);
-    setContent("");
-    setSaveState("idle");
     setSourceTarget(null);
     setCompileOverride(null);
     setSearchQuery("");
@@ -112,7 +109,7 @@ export function ProjectEditorPage() {
         return;
       }
 
-      const shouldSelectFirst = !activeFile || !files.some((file) => file.id === activeFile.id);
+      const shouldSelectFirst = !activeFile || activeFile.projectId !== projectId || !files.some((file) => file.id === activeFile.id);
       if (!shouldSelectFirst) return;
 
       const file = await queryClient.fetchQuery({

@@ -105,6 +105,9 @@ export const api = {
   snapshotDownloadUrl(projectId: string, snapshotId: string) {
     return `${API_BASE}/api/projects/${projectId}/snapshots/${snapshotId}/download`;
   },
+  projectDownloadUrl(projectId: string) {
+    return `${API_BASE}/api/projects/${projectId}/download`;
+  },
   listProjects() {
     return request<Project[]>("/api/projects");
   },
@@ -112,6 +115,15 @@ export const api = {
     return request<Project>("/api/projects", {
       method: "POST",
       body: JSON.stringify(input)
+    });
+  },
+  importProject(input: { file: File; name?: string }) {
+    const formData = new FormData();
+    formData.append("file", input.file, input.file.name);
+    const query = input.name?.trim() ? `?name=${encodeURIComponent(input.name.trim())}` : "";
+    return request<Project>(`/api/projects/import${query}`, {
+      method: "POST",
+      body: formData
     });
   },
   getProject(projectId: string) {

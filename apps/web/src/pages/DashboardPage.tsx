@@ -3,6 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { api } from "../api";
 import { AppHeader } from "../components/dashboard/AppHeader";
 import { CreateProjectForm } from "../components/dashboard/CreateProjectForm";
+import { ImportProjectForm } from "../components/dashboard/ImportProjectForm";
 import { ProjectList } from "../components/dashboard/ProjectList";
 
 export function DashboardPage() {
@@ -28,11 +29,22 @@ export function DashboardPage() {
     }
   });
 
+  const importProjectMutation = useMutation({
+    mutationFn: api.importProject,
+    onSuccess: async (project) => {
+      await queryClient.invalidateQueries({ queryKey: ["projects"] });
+      await navigate({ to: "/projects/$projectId", params: { projectId: project.id } });
+    }
+  });
+
   return (
     <main className="min-h-screen">
       <AppHeader onRefresh={() => void projectsQuery.refetch()} />
       <section className="mx-auto grid max-w-6xl gap-6 px-4 py-6 lg:grid-cols-[360px_minmax(0,1fr)]">
-        <CreateProjectForm onCreate={(input) => createProjectMutation.mutateAsync(input).then(() => undefined)} />
+        <div className="grid content-start gap-4">
+          <CreateProjectForm onCreate={(input) => createProjectMutation.mutateAsync(input).then(() => undefined)} />
+          <ImportProjectForm importing={importProjectMutation.isPending} onImport={(input) => importProjectMutation.mutateAsync(input).then(() => undefined)} />
+        </div>
         <ProjectList
           projects={projectsQuery.data ?? []}
           loading={projectsQuery.isPending}
