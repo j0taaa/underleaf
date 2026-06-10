@@ -11,13 +11,14 @@
   },
   "dependencies": {
     "@monaco-editor/react": "^4.6.0",
+    "@tanstack/react-query": "^5.101.0",
+    "@tanstack/react-router": "^1.170.15",
     "@vitejs/plugin-react": "^4.3.4",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.469.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^7.17.0",
     "tailwind-merge": "^2.6.0"
   },
   "devDependencies": {

@@ -1,13 +1,6 @@
-import { Navigate, Route, Routes } from "react-router-dom";
-import { DashboardPage } from "./pages/DashboardPage";
-import { ProjectEditorPage } from "./pages/ProjectEditorPage";
+import { RouterProvider } from "@tanstack/react-router";
+import { router } from "./router";
 
 export function App() {
-  return (
-    <Routes>
-      <Route path="/" element={<DashboardPage />} />
-      <Route path="/projects/:projectId" element={<ProjectEditorPage />} />
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
-  );
+  return <RouterProvider router={router} />;
 }

@@ -1,5 +1,5 @@
 import { ChevronLeft, LayoutPanelLeft, Maximize2, PanelRightOpen, Pencil, Play } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link } from "@tanstack/react-router";
 import type { CompileJob, Project, ProjectFileWithContent } from "../../api";
 import type { LayoutMode } from "../../types/editor";
 import { cn } from "../../lib/utils";

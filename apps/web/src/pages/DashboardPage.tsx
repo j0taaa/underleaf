@@ -1,44 +1,43 @@
-import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { api, type Project } from "../api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
+import { api } from "../api";
 import { AppHeader } from "../components/dashboard/AppHeader";
 import { CreateProjectForm } from "../components/dashboard/CreateProjectForm";
 import { ProjectList } from "../components/dashboard/ProjectList";
 
 export function DashboardPage() {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [loadingProjects, setLoadingProjects] = useState(true);
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const projectsQuery = useQuery({
+    queryKey: ["projects"],
+    queryFn: api.listProjects
+  });
 
-  const refreshProjects = useCallback(async () => {
-    setLoadingProjects(true);
-    try {
-      setProjects(await api.listProjects());
-    } finally {
-      setLoadingProjects(false);
+  const createProjectMutation = useMutation({
+    mutationFn: api.createProject,
+    onSuccess: async (project) => {
+      await queryClient.invalidateQueries({ queryKey: ["projects"] });
+      await navigate({ to: "/projects/$projectId", params: { projectId: project.id } });
     }
-  }, []);
+  });
 
-  useEffect(() => {
-    void refreshProjects();
-  }, [refreshProjects]);
-
-  const createProject = async (input: { name: string; template: string }) => {
-    const project = await api.createProject(input);
-    navigate(`/projects/${project.id}`);
-  };
-
-  const deleteProject = async (projectId: string) => {
-    await api.deleteProject(projectId);
-    await refreshProjects();
-  };
+  const deleteProjectMutation = useMutation({
+    mutationFn: api.deleteProject,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["projects"] });
+    }
+  });
 
   return (
     <main className="min-h-screen">
-      <AppHeader onRefresh={() => void refreshProjects()} />
+      <AppHeader onRefresh={() => void projectsQuery.refetch()} />
       <section className="mx-auto grid max-w-6xl gap-6 px-4 py-6 lg:grid-cols-[360px_minmax(0,1fr)]">
-        <CreateProjectForm onCreate={createProject} />
-        <ProjectList projects={projects} loading={loadingProjects} onDelete={deleteProject} />
+        <CreateProjectForm onCreate={(input) => createProjectMutation.mutateAsync(input).then(() => undefined)} />
+        <ProjectList
+          projects={projectsQuery.data ?? []}
+          loading={projectsQuery.isPending}
+          onDelete={(projectId) => deleteProjectMutation.mutateAsync(projectId).then(() => undefined)}
+        />
       </section>
     </main>
   );
