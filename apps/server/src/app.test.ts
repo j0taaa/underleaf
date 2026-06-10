@@ -209,6 +209,53 @@ describe("projects and files", () => {
     await expect(fs.readFile(path.join(tmpDir, "projects", project.id, "figures", "logo.png"), "utf8")).resolves.toBe("PNGDATA");
     await expect(fs.readFile(path.join(tmpDir, "projects", project.id, "figures", "logo-1.png"), "utf8")).resolves.toBe("PNGDATA2");
   });
+
+  it("creates and restores project snapshots", async () => {
+    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "History" } });
+    const project = projectResponse.json<{ id: string }>();
+    const files = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string }>>();
+
+    await app.inject({
+      method: "PUT",
+      url: `/api/projects/${project.id}/files/${files[0].id}/content`,
+      payload: { content: "\\documentclass{article}\\begin{document}Original\\end{document}" }
+    });
+
+    const snapshotResponse = await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/snapshots`,
+      payload: { label: "Before edits" }
+    });
+    expect(snapshotResponse.statusCode).toBe(201);
+    const snapshot = snapshotResponse.json<{ id: string; label: string; fileCount: number }>();
+    expect(snapshot).toMatchObject({ label: "Before edits", fileCount: 1 });
+
+    await app.inject({
+      method: "PUT",
+      url: `/api/projects/${project.id}/files/${files[0].id}/content`,
+      payload: { content: "\\documentclass{article}\\begin{document}Changed\\end{document}" }
+    });
+    await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/files`,
+      payload: { path: "extra.tex", content: "temporary" }
+    });
+
+    const detailResponse = await app.inject({ method: "GET", url: `/api/projects/${project.id}/snapshots/${snapshot.id}` });
+    expect(detailResponse.statusCode).toBe(200);
+    expect(detailResponse.json<{ files: Array<{ path: string }> }>().files).toEqual([expect.objectContaining({ path: "main.tex" })]);
+    const downloadResponse = await app.inject({ method: "GET", url: `/api/projects/${project.id}/snapshots/${snapshot.id}/download` });
+    expect(downloadResponse.statusCode).toBe(200);
+    expect(downloadResponse.headers["content-type"]).toContain("application/gzip");
+
+    const restoreResponse = await app.inject({ method: "POST", url: `/api/projects/${project.id}/snapshots/${snapshot.id}/restore` });
+    expect(restoreResponse.statusCode).toBe(200);
+
+    const filesAfterRestore = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
+    expect(filesAfterRestore.map((file) => file.path)).toEqual(["main.tex"]);
+    const restoredFile = await app.inject({ method: "GET", url: `/api/projects/${project.id}/files/${filesAfterRestore[0].id}` });
+    expect(restoredFile.json<{ content: string }>().content).toContain("Original");
+  });
 });
 
 describe("compile", () => {

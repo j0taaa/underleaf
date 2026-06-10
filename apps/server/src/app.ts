@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { nanoid } from "nanoid";
 import { type ServerConfig } from "./config.js";
-import { type CompileJobRow, type UnderleafDb } from "./db.js";
+import { type CompileJobRow, type FileRow, type FolderRow, type UnderleafDb } from "./db.js";
 import { ensureParentDir, normalizeProjectPath, projectFilePath, projectRoot } from "./paths.js";
 import { resolveTemplate, templates } from "./templates.js";
 
@@ -16,6 +16,14 @@ type CreateFileBody = { path?: string; content?: string };
 type UpdateFileBody = { content?: string };
 type RenamePathBody = { path?: string };
 type PdfSourceBody = { page?: number; x?: number; y?: number; text?: string };
+type CreateSnapshotBody = { label?: string };
+type SnapshotManifest = {
+  id: string;
+  projectId: string;
+  label: string;
+  createdAt: string;
+  files: Array<{ path: string; size: number }>;
+};
 
 export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance {
   const app = Fastify({ logger: true });
@@ -90,6 +98,47 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/folders", async (request, reply) => {
     if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
     return db.listFolders(request.params.projectId);
+  });
+
+  app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/snapshots", async (request, reply) => {
+    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    return db.listSnapshots(request.params.projectId);
+  });
+
+  app.post<{ Params: { projectId: string }; Body: CreateSnapshotBody }>("/api/projects/:projectId/snapshots", async (request, reply) => {
+    const project = db.getProject(request.params.projectId);
+    if (!project) return reply.code(404).send({ message: "Project not found" });
+
+    const snapshot = await createProjectSnapshot(db, config, project.id, request.body.label);
+    return reply.code(201).send(snapshot);
+  });
+
+  app.get<{ Params: { projectId: string; snapshotId: string } }>("/api/projects/:projectId/snapshots/:snapshotId", async (request, reply) => {
+    const snapshot = db.getSnapshot(request.params.projectId, request.params.snapshotId);
+    if (!snapshot) return reply.code(404).send({ message: "Snapshot not found" });
+
+    const manifest = await readSnapshotManifest(config, snapshot.projectId, snapshot.id);
+    return { ...snapshot, files: manifest.files };
+  });
+
+  app.post<{ Params: { projectId: string; snapshotId: string } }>("/api/projects/:projectId/snapshots/:snapshotId/restore", async (request, reply) => {
+    const snapshot = db.getSnapshot(request.params.projectId, request.params.snapshotId);
+    if (!snapshot) return reply.code(404).send({ message: "Snapshot not found" });
+
+    await restoreProjectSnapshot(db, config, snapshot.projectId, snapshot.id);
+    return { ok: true };
+  });
+
+  app.get<{ Params: { projectId: string; snapshotId: string } }>("/api/projects/:projectId/snapshots/:snapshotId/download", async (request, reply) => {
+    const snapshot = db.getSnapshot(request.params.projectId, request.params.snapshotId);
+    if (!snapshot) return reply.code(404).send({ message: "Snapshot not found" });
+
+    const sourceDir = snapshotSourceDir(config.dataDir, snapshot.projectId, snapshot.id);
+    const archive = await spawnCommandBuffer("tar", ["-czf", "-", "-C", sourceDir, "."]);
+    return reply
+      .type("application/gzip")
+      .header("Content-Disposition", `attachment; filename="${sanitizeDownloadName(snapshot.label || "snapshot")}.tar.gz"`)
+      .send(archive);
   });
 
   app.get<{ Params: { projectId: string; fileId: string } }>("/api/projects/:projectId/files/:fileId", async (request, reply) => {
@@ -421,6 +470,128 @@ function resolveAvailableUploadPath(db: UnderleafDb, projectId: string, requeste
   throw new Error("Unable to find available upload path");
 }
 
+async function createProjectSnapshot(db: UnderleafDb, config: ServerConfig, projectId: string, label: string | undefined) {
+  const now = new Date().toISOString();
+  const files = db.listFiles(projectId);
+  const snapshot = {
+    id: nanoid(),
+    projectId,
+    label: label?.trim() || `Snapshot ${new Date(now).toLocaleString("en-US")}`,
+    fileCount: files.length,
+    createdAt: now
+  };
+  const sourceDir = snapshotSourceDir(config.dataDir, projectId, snapshot.id);
+  await fs.mkdir(sourceDir, { recursive: true });
+
+  const manifestFiles: SnapshotManifest["files"] = [];
+  for (const file of files) {
+    const source = projectFilePath(config.dataDir, projectId, file.path);
+    const target = path.join(sourceDir, file.path);
+    await ensureParentDir(target);
+    await fs.copyFile(source, target);
+    const stat = await fs.stat(target);
+    manifestFiles.push({ path: file.path, size: stat.size });
+  }
+
+  const manifest: SnapshotManifest = {
+    id: snapshot.id,
+    projectId,
+    label: snapshot.label,
+    createdAt: snapshot.createdAt,
+    files: manifestFiles
+  };
+  await writeSnapshotManifest(config, manifest);
+  db.createSnapshot(snapshot);
+  return snapshot;
+}
+
+async function restoreProjectSnapshot(db: UnderleafDb, config: ServerConfig, projectId: string, snapshotId: string): Promise<void> {
+  const manifest = await readSnapshotManifest(config, projectId, snapshotId);
+  const root = projectRoot(config.dataDir, projectId);
+  const sourceDir = snapshotSourceDir(config.dataDir, projectId, snapshotId);
+  const now = new Date().toISOString();
+
+  for (const file of db.listFiles(projectId)) {
+    await fs.rm(projectFilePath(config.dataDir, projectId, file.path), { force: true });
+  }
+
+  const restoredFiles: FileRow[] = [];
+  const restoredFolderPaths = new Set<string>();
+  for (const file of manifest.files) {
+    const safePath = normalizeProjectPath(file.path);
+    const source = path.join(sourceDir, safePath);
+    const target = projectFilePath(config.dataDir, projectId, safePath);
+    await ensureParentDir(target);
+    await fs.copyFile(source, target);
+    restoredFiles.push({ id: nanoid(), projectId, path: safePath, createdAt: now, updatedAt: now });
+
+    const folder = path.posix.dirname(safePath);
+    if (folder && folder !== ".") {
+      const parts = folder.split("/");
+      for (let index = 0; index < parts.length; index += 1) {
+        restoredFolderPaths.add(parts.slice(0, index + 1).join("/"));
+      }
+    }
+  }
+
+  const restoredFolders: FolderRow[] = [...restoredFolderPaths].sort().map((folderPath) => ({
+    id: nanoid(),
+    projectId,
+    path: folderPath,
+    createdAt: now,
+    updatedAt: now
+  }));
+  db.replaceProjectTree(projectId, restoredFiles, restoredFolders, now);
+  await removeEmptyProjectDirs(root, new Set([".underleaf-snapshots"]));
+}
+
+async function readSnapshotManifest(config: ServerConfig, projectId: string, snapshotId: string): Promise<SnapshotManifest> {
+  const content = await fs.readFile(snapshotManifestPath(config.dataDir, projectId, snapshotId), "utf8");
+  return JSON.parse(content) as SnapshotManifest;
+}
+
+async function writeSnapshotManifest(config: ServerConfig, manifest: SnapshotManifest): Promise<void> {
+  await fs.writeFile(snapshotManifestPath(config.dataDir, manifest.projectId, manifest.id), JSON.stringify(manifest, null, 2), "utf8");
+}
+
+function snapshotRoot(dataDir: string, projectId: string): string {
+  return path.join(projectRoot(dataDir, projectId), ".underleaf-snapshots");
+}
+
+function snapshotSourceDir(dataDir: string, projectId: string, snapshotId: string): string {
+  return path.join(snapshotRoot(dataDir, projectId), snapshotId, "source");
+}
+
+function snapshotManifestPath(dataDir: string, projectId: string, snapshotId: string): string {
+  return path.join(snapshotRoot(dataDir, projectId), snapshotId, "manifest.json");
+}
+
+async function removeEmptyProjectDirs(dir: string, preserveNames: Set<string>): Promise<boolean> {
+  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+  let isEmpty = true;
+
+  for (const entry of entries) {
+    if (preserveNames.has(entry.name)) {
+      isEmpty = false;
+      continue;
+    }
+    const child = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const childEmpty = await removeEmptyProjectDirs(child, preserveNames);
+      if (childEmpty) await fs.rmdir(child).catch(() => undefined);
+      else isEmpty = false;
+    } else {
+      isEmpty = false;
+    }
+  }
+
+  return isEmpty && dir !== path.dirname(dir);
+}
+
+function sanitizeDownloadName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "snapshot";
+}
+
 async function locateSourceWithSynctex(
   db: UnderleafDb,
   projectId: string,
@@ -508,5 +679,27 @@ function spawnCommand(bin: string, args: string[], cwd: string): Promise<{ code:
     });
     child.on("error", reject);
     child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+function spawnCommandBuffer(bin: string, args: string[]): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, {
+      env: process.env
+    });
+    const stdout: Buffer[] = [];
+    let stderr = "";
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout.push(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(Buffer.concat(stdout));
+      else reject(new Error(stderr || `${bin} exited with code ${code}`));
+    });
   });
 }

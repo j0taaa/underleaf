@@ -1,4 +1,4 @@
-import { ChevronLeft, LayoutPanelLeft, Maximize2, PanelRightOpen, Pencil, Play } from "lucide-react";
+import { ChevronLeft, History, LayoutPanelLeft, Maximize2, PanelRightOpen, Pencil, Play } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import type { CompileJob, Project, ProjectFileWithContent } from "../../api";
 import type { LayoutMode } from "../../types/editor";
@@ -18,6 +18,7 @@ export function EditorHeader({
   onProjectNameChange,
   onRenameStart,
   onRenameSubmit,
+  onHistoryToggle,
   onLayoutChange,
   onCompile
 }: {
@@ -32,6 +33,7 @@ export function EditorHeader({
   onProjectNameChange: (name: string) => void;
   onRenameStart: () => void;
   onRenameSubmit: () => void;
+  onHistoryToggle: () => void;
   onLayoutChange: (layout: LayoutMode) => void;
   onCompile: () => void;
 }) {
@@ -74,6 +76,10 @@ export function EditorHeader({
         <span className={cn("hidden text-xs sm:inline", compileJob?.status === "error" ? "text-destructive" : "text-muted-foreground")}>
           {statusText}
         </span>
+        <Button variant="outline" size="sm" title="History" onClick={onHistoryToggle}>
+          <History className="h-4 w-4" />
+          History
+        </Button>
         <div className="hidden items-center rounded-md border border-border p-0.5 md:flex">
           <Button variant={layout === "split" ? "secondary" : "ghost"} size="icon" title="Split view" onClick={() => onLayoutChange("split")}>
             <LayoutPanelLeft className="h-4 w-4" />

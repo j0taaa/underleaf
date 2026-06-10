@@ -46,6 +46,18 @@ export type PdfSourceLocation = {
   source: "synctex" | "text";
 };
 
+export type ProjectSnapshot = {
+  id: string;
+  projectId: string;
+  label: string;
+  fileCount: number;
+  createdAt: string;
+};
+
+export type ProjectSnapshotDetail = ProjectSnapshot & {
+  files: Array<{ path: string; size: number }>;
+};
+
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:3001";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -71,6 +83,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   pdfUrl(projectId: string, nonce: number) {
     return `${API_BASE}/api/projects/${projectId}/pdf?t=${nonce}`;
+  },
+  snapshotDownloadUrl(projectId: string, snapshotId: string) {
+    return `${API_BASE}/api/projects/${projectId}/snapshots/${snapshotId}/download`;
   },
   listProjects() {
     return request<Project[]>("/api/projects");
@@ -98,6 +113,21 @@ export const api = {
   },
   listFolders(projectId: string) {
     return request<ProjectFolder[]>(`/api/projects/${projectId}/folders`);
+  },
+  listSnapshots(projectId: string) {
+    return request<ProjectSnapshot[]>(`/api/projects/${projectId}/snapshots`);
+  },
+  createSnapshot(projectId: string, label: string) {
+    return request<ProjectSnapshot>(`/api/projects/${projectId}/snapshots`, {
+      method: "POST",
+      body: JSON.stringify({ label })
+    });
+  },
+  getSnapshot(projectId: string, snapshotId: string) {
+    return request<ProjectSnapshotDetail>(`/api/projects/${projectId}/snapshots/${snapshotId}`);
+  },
+  restoreSnapshot(projectId: string, snapshotId: string) {
+    return request<{ ok: true }>(`/api/projects/${projectId}/snapshots/${snapshotId}/restore`, { method: "POST" });
   },
   getFile(projectId: string, fileId: string) {
     return request<ProjectFileWithContent>(`/api/projects/${projectId}/files/${fileId}`);

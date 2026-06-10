@@ -40,6 +40,14 @@ export type CompileJobRow = {
   updatedAt: string;
 };
 
+export type ProjectSnapshotRow = {
+  id: string;
+  projectId: string;
+  label: string;
+  fileCount: number;
+  createdAt: string;
+};
+
 export type UnderleafDb = ReturnType<typeof createDb>;
 
 export function createDb(databaseUrl: string) {
@@ -92,6 +100,14 @@ export function createDb(databaseUrl: string) {
       duration_ms INTEGER,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS project_snapshots (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      label TEXT NOT NULL,
+      file_count INTEGER NOT NULL,
+      created_at TEXT NOT NULL
     );
   `);
 
@@ -232,6 +248,41 @@ export function createDb(databaseUrl: string) {
     },
     latestCompileJob(projectId: string): CompileJobRow | undefined {
       return db.prepare("SELECT id, project_id as projectId, status, stdout, stderr, pdf_path as pdfPath, duration_ms as durationMs, created_at as createdAt, updated_at as updatedAt FROM compile_jobs WHERE project_id = ? ORDER BY created_at DESC LIMIT 1").get(projectId) as CompileJobRow | undefined;
+    },
+    listSnapshots(projectId: string): ProjectSnapshotRow[] {
+      return db.prepare("SELECT id, project_id as projectId, label, file_count as fileCount, created_at as createdAt FROM project_snapshots WHERE project_id = ? ORDER BY created_at DESC").all(projectId) as ProjectSnapshotRow[];
+    },
+    getSnapshot(projectId: string, snapshotId: string): ProjectSnapshotRow | undefined {
+      return db.prepare("SELECT id, project_id as projectId, label, file_count as fileCount, created_at as createdAt FROM project_snapshots WHERE project_id = ? AND id = ?").get(projectId, snapshotId) as ProjectSnapshotRow | undefined;
+    },
+    createSnapshot(snapshot: ProjectSnapshotRow): void {
+      db.prepare("INSERT INTO project_snapshots (id, project_id, label, file_count, created_at) VALUES (?, ?, ?, ?, ?)").run(
+        snapshot.id,
+        snapshot.projectId,
+        snapshot.label,
+        snapshot.fileCount,
+        snapshot.createdAt
+      );
+    },
+    replaceProjectTree(projectId: string, files: FileRow[], folders: FolderRow[], updatedAt: string): void {
+      const transaction = db.transaction(() => {
+        db.prepare("DELETE FROM files WHERE project_id = ?").run(projectId);
+        db.prepare("DELETE FROM folders WHERE project_id = ?").run(projectId);
+
+        const insertFolder = db.prepare("INSERT INTO folders (id, project_id, path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)");
+        for (const folder of folders) {
+          insertFolder.run(folder.id, folder.projectId, folder.path, folder.createdAt, folder.updatedAt);
+        }
+
+        const insertFile = db.prepare("INSERT INTO files (id, project_id, path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)");
+        for (const file of files) {
+          insertFile.run(file.id, file.projectId, file.path, file.createdAt, file.updatedAt);
+        }
+
+        db.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").run(updatedAt, projectId);
+      });
+
+      transaction();
     }
   };
 }

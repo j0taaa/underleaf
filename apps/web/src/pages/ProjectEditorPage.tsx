@@ -5,6 +5,8 @@ import { api, type CompileJob, type ProjectFile, type ProjectFileWithContent, ty
 import { EditorHeader } from "../components/editor/EditorHeader";
 import { EditorLayout } from "../components/editor/EditorLayout";
 import { FileSidebar } from "../components/editor/FileSidebar";
+import { HistoryPanel } from "../components/editor/HistoryPanel";
+import { cn } from "../lib/utils";
 import type { LayoutMode, SaveState } from "../types/editor";
 
 type UploadItem = { file: File; path: string };
@@ -37,6 +39,8 @@ export function ProjectEditorPage() {
   const [renaming, setRenaming] = useState(false);
   const [projectName, setProjectName] = useState("");
   const [sourceTarget, setSourceTarget] = useState<{ fileId: string; line: number; column: number; nonce: number } | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [snapshotLabel, setSnapshotLabel] = useState("");
 
   const projectQuery = useQuery({
     queryKey: ["project", projectId],
@@ -53,6 +57,11 @@ export function ProjectEditorPage() {
     queryFn: () => api.listFolders(projectId)
   });
 
+  const snapshotsQuery = useQuery({
+    queryKey: ["project-snapshots", projectId],
+    queryFn: () => api.listSnapshots(projectId)
+  });
+
   const latestCompileQuery = useQuery({
     queryKey: ["latest-compile", projectId],
     queryFn: () => api.latestCompile(projectId)
@@ -61,6 +70,7 @@ export function ProjectEditorPage() {
   const project = projectQuery.data ?? null;
   const files = filesQuery.data ?? [];
   const folders = foldersQuery.data ?? [];
+  const snapshots = snapshotsQuery.data ?? [];
   const compileJob = compileOverride ?? latestCompileQuery.data ?? null;
 
   useEffect(() => {
@@ -164,6 +174,28 @@ export function ProjectEditorPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] })
+      ]);
+    }
+  });
+
+  const createSnapshotMutation = useMutation({
+    mutationFn: (label: string) => api.createSnapshot(projectId, label),
+    onSuccess: async () => {
+      setSnapshotLabel("");
+      await queryClient.invalidateQueries({ queryKey: ["project-snapshots", projectId] });
+    }
+  });
+
+  const restoreSnapshotMutation = useMutation({
+    mutationFn: (snapshotId: string) => api.restoreSnapshot(projectId, snapshotId),
+    onSuccess: async () => {
+      setActiveFile(null);
+      setContent("");
+      setSourceTarget(null);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
+        queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
+        queryClient.invalidateQueries({ queryKey: ["project-snapshots", projectId] })
       ]);
     }
   });
@@ -285,6 +317,14 @@ export function ProjectEditorPage() {
     await renameProjectMutation.mutateAsync(projectName);
   };
 
+  const createSnapshot = async () => {
+    await createSnapshotMutation.mutateAsync(snapshotLabel);
+  };
+
+  const restoreSnapshot = async (snapshotId: string) => {
+    await restoreSnapshotMutation.mutateAsync(snapshotId);
+  };
+
   const showPdfSource = async (location: { fileId: string; line: number; column: number }) => {
     const file = files.find((item) => item.id === location.fileId);
     if (!file) return;
@@ -338,10 +378,11 @@ export function ProjectEditorPage() {
         onProjectNameChange={setProjectName}
         onRenameStart={() => setRenaming(true)}
         onRenameSubmit={() => void renameProject()}
+        onHistoryToggle={() => setHistoryOpen((current) => !current)}
         onLayoutChange={setLayout}
         onCompile={() => void compile()}
       />
-      <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[260px_minmax(0,1fr)]">
+      <div className={cn("grid min-h-0 flex-1 grid-cols-1", historyOpen ? "md:grid-cols-[260px_minmax(0,1fr)_320px]" : "md:grid-cols-[260px_minmax(0,1fr)]")}>
         <FileSidebar
           files={files}
           folders={folders}
@@ -368,6 +409,19 @@ export function ProjectEditorPage() {
           onPdfReload={() => setPdfNonce(Date.now())}
           onPdfSourceLocated={(location) => void showPdfSource(location)}
         />
+        {historyOpen && (
+          <HistoryPanel
+            projectId={projectId}
+            snapshots={snapshots}
+            label={snapshotLabel}
+            creating={createSnapshotMutation.isPending}
+            restoringId={typeof restoreSnapshotMutation.variables === "string" && restoreSnapshotMutation.isPending ? restoreSnapshotMutation.variables : null}
+            onLabelChange={setSnapshotLabel}
+            onCreate={() => void createSnapshot()}
+            onRestore={(snapshot) => void restoreSnapshot(snapshot.id)}
+            onClose={() => setHistoryOpen(false)}
+          />
+        )}
       </div>
     </main>
   );
