@@ -2,6 +2,7 @@ import Editor from "@monaco-editor/react";
 import { Save } from "lucide-react";
 import type { ProjectFileWithContent } from "../../api";
 import type { SaveState } from "../../types/editor";
+import { registerLatexLanguage } from "../../lib/monacoLatex";
 import { cn } from "../../lib/utils";
 
 export function SourceEditorPane({
@@ -34,8 +35,9 @@ export function SourceEditorPane({
         <Editor
           height="100%"
           language="latex"
-          theme="vs-dark"
+          theme="underleaf-dark"
           value={content}
+          beforeMount={registerLatexLanguage}
           options={{
             minimap: { enabled: false },
             fontSize: 14,
