@@ -2,10 +2,11 @@ import Editor, { type OnMount } from "@monaco-editor/react";
 import type { Monaco } from "@monaco-editor/react";
 import { Save } from "lucide-react";
 import { useEffect, useRef } from "react";
-import type { ProjectFileWithContent, ProjectSymbols } from "../../api";
+import type { ProjectFile, ProjectFileWithContent, ProjectSymbols } from "../../api";
 import type { SaveState } from "../../types/editor";
 import { registerLatexLanguage } from "../../lib/monacoLatex";
 import { cn } from "../../lib/utils";
+import { OpenFileTabs } from "./OpenFileTabs";
 
 type MonacoPosition = { lineNumber: number; column: number };
 type MonacoRange = { startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number };
@@ -16,18 +17,28 @@ type CompletionModel = {
 
 export function SourceEditorPane({
   activeFile,
+  files,
+  openFileIds,
+  dirtyFileId,
   content,
   saveState,
   sourceTarget,
   symbols,
-  onContentChange
+  onContentChange,
+  onOpenTab,
+  onCloseTab
 }: {
   activeFile: ProjectFileWithContent | null;
+  files: ProjectFile[];
+  openFileIds: string[];
+  dirtyFileId: string | null;
   content: string;
   saveState: SaveState;
   sourceTarget: { line: number; column: number; nonce: number } | null;
   symbols: ProjectSymbols | null;
   onContentChange: (content: string) => void;
+  onOpenTab: (file: ProjectFile) => void;
+  onCloseTab: (fileId: string) => void;
 }) {
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
@@ -78,7 +89,15 @@ export function SourceEditorPane({
 
   return (
     <div className="flex min-h-0 flex-col border-r border-border bg-[#1f2430]">
-      <div className="flex h-10 shrink-0 items-center justify-between border-b border-slate-700 px-3 text-xs text-slate-300">
+      <OpenFileTabs
+        files={files}
+        activeFile={activeFile}
+        openFileIds={openFileIds}
+        dirtyFileId={dirtyFileId}
+        onOpen={onOpenTab}
+        onClose={onCloseTab}
+      />
+      <div className="flex h-7 shrink-0 items-center justify-between border-b border-slate-700 px-3 text-xs text-slate-300">
         <span>{activeFile?.path ?? "Select a file"}</span>
         <span className={cn(saveState === "error" ? "text-red-300" : "text-slate-400")}>
           {saveState === "saving" && "Saving..."}

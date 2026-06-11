@@ -1,4 +1,4 @@
-import type { CompileDiagnostic, CompileJob, ProjectFileWithContent, ProjectSymbols } from "../../api";
+import type { CompileDiagnostic, CompileJob, ProjectFile, ProjectFileWithContent, ProjectSymbols } from "../../api";
 import type { LayoutMode, SaveState } from "../../types/editor";
 import { cn } from "../../lib/utils";
 import { PdfPreviewPane } from "./PdfPreviewPane";
@@ -8,6 +8,9 @@ export function EditorLayout({
   layout,
   projectId,
   activeFile,
+  files,
+  openFileIds,
+  dirtyFileId,
   content,
   saveState,
   compileJob,
@@ -15,6 +18,8 @@ export function EditorLayout({
   sourceTarget,
   symbols,
   onContentChange,
+  onOpenTab,
+  onCloseTab,
   onPdfReload,
   onPdfSourceLocated,
   onDiagnosticSelected
@@ -22,6 +27,9 @@ export function EditorLayout({
   layout: LayoutMode;
   projectId: string;
   activeFile: ProjectFileWithContent | null;
+  files: ProjectFile[];
+  openFileIds: string[];
+  dirtyFileId: string | null;
   content: string;
   saveState: SaveState;
   compileJob: CompileJob | null;
@@ -29,6 +37,8 @@ export function EditorLayout({
   sourceTarget: { line: number; column: number; nonce: number } | null;
   symbols: ProjectSymbols | null;
   onContentChange: (content: string) => void;
+  onOpenTab: (file: ProjectFile) => void;
+  onCloseTab: (fileId: string) => void;
   onPdfReload: () => void;
   onPdfSourceLocated: (location: { fileId: string; line: number; column: number }) => void;
   onDiagnosticSelected: (diagnostic: CompileDiagnostic) => void;
@@ -42,7 +52,21 @@ export function EditorLayout({
         layout === "pdf" && "grid-cols-1"
       )}
     >
-      {layout !== "pdf" && <SourceEditorPane activeFile={activeFile} content={content} saveState={saveState} sourceTarget={sourceTarget} symbols={symbols} onContentChange={onContentChange} />}
+      {layout !== "pdf" && (
+        <SourceEditorPane
+          activeFile={activeFile}
+          files={files}
+          openFileIds={openFileIds}
+          dirtyFileId={dirtyFileId}
+          content={content}
+          saveState={saveState}
+          sourceTarget={sourceTarget}
+          symbols={symbols}
+          onContentChange={onContentChange}
+          onOpenTab={onOpenTab}
+          onCloseTab={onCloseTab}
+        />
+      )}
       {layout !== "editor" && (
         <PdfPreviewPane
           projectId={projectId}

@@ -33,6 +33,8 @@ export function ProjectEditorPage() {
   const { projectId } = useParams({ from: "/projects/$projectId" });
   const queryClient = useQueryClient();
   const [activeFile, setActiveFile] = useState<ProjectFileWithContent | null>(null);
+  const [openFileIds, setOpenFileIds] = useState<string[]>([]);
+  const [autoOpenedProjectId, setAutoOpenedProjectId] = useState<string | null>(null);
   const [content, setContent] = useState("");
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [layout, setLayout] = useState<LayoutMode>("split");
@@ -111,6 +113,7 @@ export function ProjectEditorPage() {
   const searchResults = debouncedSearchQuery.trim().length >= 2 ? projectSearchQuery.data ?? [] : [];
   const outlineItems = projectOutlineQuery.data ?? [];
   const projectSymbols = projectSymbolsQuery.data ?? null;
+  const dirtyFileId = activeFile && content !== activeFile.content ? activeFile.id : null;
 
   const invalidateProject = async () => {
     await queryClient.invalidateQueries({ queryKey: ["project", projectId] });
@@ -139,6 +142,8 @@ export function ProjectEditorPage() {
   useEffect(() => {
     setSourceTarget(null);
     setCompileOverride(null);
+    setAutoOpenedProjectId(null);
+    setOpenFileIds([]);
     setSearchQuery("");
     setDebouncedSearchQuery("");
     setCommitMessage("");
@@ -156,24 +161,31 @@ export function ProjectEditorPage() {
     const selectFirstFile = async () => {
       if (files.length === 0) {
         setActiveFile(null);
+        setOpenFileIds([]);
         setContent("");
         return;
       }
 
-      const shouldSelectFirst = !activeFile || activeFile.projectId !== projectId || !files.some((file) => file.id === activeFile.id);
+      const activeFileMissing = Boolean(activeFile && activeFile.projectId === projectId && !files.some((file) => file.id === activeFile.id));
+      const shouldSelectFirst = activeFileMissing || activeFile?.projectId !== projectId || (!activeFile && autoOpenedProjectId !== projectId);
       if (!shouldSelectFirst) return;
 
+      const defaultFile = selectDefaultFile(files, project?.rootFilePath ?? null);
+      if (!defaultFile) return;
+
       const file = await queryClient.fetchQuery({
-        queryKey: ["project-file", projectId, files[0].id],
-        queryFn: () => api.getFile(projectId, files[0].id)
+        queryKey: ["project-file", projectId, defaultFile.id],
+        queryFn: () => api.getFile(projectId, defaultFile.id)
       });
       setActiveFile(file);
+      setOpenFileIds((current) => current.includes(file.id) ? current : [file.id]);
+      setAutoOpenedProjectId(projectId);
       setContent(file.content);
       setSaveState("idle");
     };
 
     void selectFirstFile();
-  }, [activeFile, files, projectId, queryClient]);
+  }, [activeFile, autoOpenedProjectId, files, project?.rootFilePath, projectId, queryClient]);
 
   const saveFileMutation = useMutation({
     mutationFn: ({ fileId, nextContent }: { fileId: string; nextContent: string }) => api.saveFile(projectId, fileId, nextContent),
@@ -185,6 +197,13 @@ export function ProjectEditorPage() {
     },
     onError: () => setSaveState("error")
   });
+
+  const saveCurrentFile = async () => {
+    if (!activeFile || activeFile.projectId !== projectId || content === activeFile.content) return activeFile;
+
+    setSaveState("saving");
+    return saveFileMutation.mutateAsync({ fileId: activeFile.id, nextContent: content });
+  };
 
   const createFileMutation = useMutation({
     mutationFn: (path: string) => api.createFile(projectId, path),
@@ -401,15 +420,41 @@ export function ProjectEditorPage() {
     return () => window.removeEventListener("paste", onPaste);
   });
 
-  const openFile = async (file: ProjectFile) => {
+  const openFile = async (file: ProjectFile, options: { saveCurrent?: boolean } = {}) => {
+    if (options.saveCurrent !== false && activeFile?.id !== file.id) {
+      await saveCurrentFile();
+    }
+
     const nextFile = await queryClient.fetchQuery({
       queryKey: ["project-file", projectId, file.id],
       queryFn: () => api.getFile(projectId, file.id)
     });
     setActiveFile(nextFile);
+    setOpenFileIds((current) => current.includes(nextFile.id) ? current : [...current, nextFile.id]);
     setContent(nextFile.content);
     setSaveState("idle");
     return nextFile;
+  };
+
+  const closeFileTab = async (fileId: string) => {
+    const currentOpenIds = openFileIds.filter((id) => files.some((file) => file.id === id));
+    const closingIndex = currentOpenIds.indexOf(fileId);
+    setOpenFileIds((current) => current.filter((id) => id !== fileId));
+
+    if (activeFile?.id !== fileId) return;
+
+    await saveCurrentFile();
+
+    const nextFileId = currentOpenIds[closingIndex + 1] ?? currentOpenIds[closingIndex - 1] ?? null;
+    const nextFile = nextFileId ? files.find((file) => file.id === nextFileId) : null;
+    if (nextFile) {
+      await openFile(nextFile, { saveCurrent: false });
+      return;
+    }
+
+    setActiveFile(null);
+    setContent("");
+    setSaveState("idle");
   };
 
   const createFile = async (path: string) => {
@@ -434,6 +479,7 @@ export function ProjectEditorPage() {
 
   const deleteFile = async (file: ProjectFile) => {
     await deleteFileMutation.mutateAsync(file.id);
+    setOpenFileIds((current) => current.filter((id) => id !== file.id));
     if (activeFile?.id === file.id) {
       setActiveFile(null);
       setContent("");
@@ -442,6 +488,10 @@ export function ProjectEditorPage() {
 
   const deleteFolder = async (folder: ProjectFolder) => {
     await deleteFolderMutation.mutateAsync(folder.id);
+    setOpenFileIds((current) => current.filter((id) => {
+      const file = files.find((item) => item.id === id);
+      return file ? !file.path.startsWith(`${folder.path}/`) : false;
+    }));
     if (activeFile?.path.startsWith(`${folder.path}/`)) {
       setActiveFile(null);
       setContent("");
@@ -459,6 +509,7 @@ export function ProjectEditorPage() {
   };
 
   const compile = async () => {
+    await saveCurrentFile();
     await compileMutation.mutateAsync().catch(() => undefined);
   };
 
@@ -484,8 +535,29 @@ export function ProjectEditorPage() {
 
   const commitGit = async () => {
     if (!commitMessage.trim()) return;
+    await saveCurrentFile();
     await commitGitMutation.mutateAsync(commitMessage);
   };
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const modifier = event.metaKey || event.ctrlKey;
+      if (!modifier) return;
+
+      if (event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        void saveCurrentFile();
+      }
+
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void compile();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
 
   const showPdfSource = async (location: { fileId: string; line: number; column: number }) => {
     const file = files.find((item) => item.id === location.fileId);
@@ -629,6 +701,9 @@ export function ProjectEditorPage() {
           layout={layout}
           projectId={projectId}
           activeFile={activeFile}
+          files={files}
+          openFileIds={openFileIds}
+          dirtyFileId={dirtyFileId}
           content={content}
           saveState={saveState}
           compileJob={compileJob}
@@ -636,6 +711,8 @@ export function ProjectEditorPage() {
           sourceTarget={sourceTarget}
           symbols={projectSymbols}
           onContentChange={setContent}
+          onOpenTab={(file) => void openFile(file)}
+          onCloseTab={(fileId) => void closeFileTab(fileId)}
           onPdfReload={() => setPdfNonce(Date.now())}
           onPdfSourceLocated={(location) => void showPdfSource(location)}
           onDiagnosticSelected={(diagnostic) => void showCompileDiagnostic(diagnostic)}
@@ -741,6 +818,13 @@ function extensionFromFile(file: File): string {
   if (file.type === "image/svg+xml") return ".svg";
   if (file.type === "application/pdf") return ".pdf";
   return ".png";
+}
+
+function selectDefaultFile(files: ProjectFile[], rootFilePath: string | null): ProjectFile | null {
+  return files.find((file) => file.path === rootFilePath)
+    ?? files.find((file) => file.path === "main.tex")
+    ?? files[0]
+    ?? null;
 }
 
 function joinUploadPath(parentPath: string, childPath: string): string {
