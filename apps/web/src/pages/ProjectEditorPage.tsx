@@ -112,6 +112,10 @@ export function ProjectEditorPage() {
   const outlineItems = projectOutlineQuery.data ?? [];
   const projectSymbols = projectSymbolsQuery.data ?? null;
 
+  const invalidateProject = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+  };
+
   const invalidateGitStatus = async () => {
     await queryClient.invalidateQueries({ queryKey: ["project-git-status", projectId] });
   };
@@ -187,6 +191,7 @@ export function ProjectEditorPage() {
     onSuccess: async (file) => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
+        invalidateProject(),
         invalidateGitStatus(),
         invalidateOutline(),
         invalidateWordCount(),
@@ -201,6 +206,7 @@ export function ProjectEditorPage() {
     onSuccess: async (file) => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
+        invalidateProject(),
         invalidateGitStatus(),
         invalidateOutline(),
         invalidateWordCount(),
@@ -221,6 +227,7 @@ export function ProjectEditorPage() {
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
+        invalidateProject(),
         invalidateGitStatus(),
         invalidateOutline(),
         invalidateWordCount(),
@@ -248,6 +255,7 @@ export function ProjectEditorPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
+        invalidateProject(),
         invalidateGitStatus(),
         invalidateOutline(),
         invalidateWordCount(),
@@ -264,6 +272,7 @@ export function ProjectEditorPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
+        invalidateProject(),
         invalidateGitStatus(),
         invalidateOutline(),
         invalidateWordCount(),
@@ -278,6 +287,7 @@ export function ProjectEditorPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
+        invalidateProject(),
         invalidateGitStatus(),
         invalidateOutline(),
         invalidateWordCount(),
@@ -304,6 +314,7 @@ export function ProjectEditorPage() {
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
         queryClient.invalidateQueries({ queryKey: ["project-snapshots", projectId] }),
+        invalidateProject(),
         invalidateGitStatus(),
         invalidateOutline(),
         invalidateWordCount(),
@@ -350,6 +361,17 @@ export function ProjectEditorPage() {
       setProjectName(nextProject.name);
       setRenaming(false);
       await queryClient.invalidateQueries({ queryKey: ["projects"] });
+    }
+  });
+
+  const updateRootFileMutation = useMutation({
+    mutationFn: (rootFilePath: string | null) => api.updateProjectRootFile(projectId, rootFilePath),
+    onSuccess: async (nextProject) => {
+      queryClient.setQueryData(["project", projectId], nextProject);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["latest-compile", projectId] }),
+        invalidateGitStatus()
+      ]);
     }
   });
 
@@ -442,6 +464,10 @@ export function ProjectEditorPage() {
 
   const renameProject = async () => {
     await renameProjectMutation.mutateAsync(projectName);
+  };
+
+  const updateRootFile = async (rootFilePath: string | null) => {
+    await updateRootFileMutation.mutateAsync(rootFilePath);
   };
 
   const createSnapshot = async () => {
@@ -547,15 +573,18 @@ export function ProjectEditorPage() {
       <EditorHeader
         project={project}
         activeFile={activeFile}
+        files={files}
         projectName={projectName}
         renaming={renaming}
         layout={layout}
         compileJob={compileJob}
         compiling={compileMutation.isPending}
+        updatingRootFile={updateRootFileMutation.isPending}
         statusText={statusText}
         onProjectNameChange={setProjectName}
         onRenameStart={() => setRenaming(true)}
         onRenameSubmit={() => void renameProject()}
+        onRootFileChange={(rootFilePath) => void updateRootFile(rootFilePath)}
         onHistoryToggle={() => {
           setSourceControlOpen(false);
           setWordCountOpen(false);

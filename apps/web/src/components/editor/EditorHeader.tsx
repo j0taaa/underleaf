@@ -1,23 +1,27 @@
 import { BarChart3, ChevronLeft, Download, GitBranch, History, LayoutPanelLeft, Maximize2, PanelRightOpen, Pencil, Play } from "lucide-react";
 import { Link } from "@tanstack/react-router";
-import { api, type CompileJob, type Project, type ProjectFileWithContent } from "../../api";
+import { api, type CompileJob, type Project, type ProjectFile, type ProjectFileWithContent } from "../../api";
 import type { LayoutMode } from "../../types/editor";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { ProjectSettingsMenu } from "./ProjectSettingsMenu";
 
 export function EditorHeader({
   project,
   activeFile,
+  files,
   projectName,
   renaming,
   layout,
   compileJob,
   compiling,
+  updatingRootFile,
   statusText,
   onProjectNameChange,
   onRenameStart,
   onRenameSubmit,
+  onRootFileChange,
   onHistoryToggle,
   onSourceControlToggle,
   onWordCountToggle,
@@ -26,15 +30,18 @@ export function EditorHeader({
 }: {
   project: Project;
   activeFile: ProjectFileWithContent | null;
+  files: ProjectFile[];
   projectName: string;
   renaming: boolean;
   layout: LayoutMode;
   compileJob: CompileJob | null;
   compiling: boolean;
+  updatingRootFile: boolean;
   statusText: string;
   onProjectNameChange: (name: string) => void;
   onRenameStart: () => void;
   onRenameSubmit: () => void;
+  onRootFileChange: (rootFilePath: string | null) => void;
   onHistoryToggle: () => void;
   onSourceControlToggle: () => void;
   onWordCountToggle: () => void;
@@ -100,6 +107,12 @@ export function EditorHeader({
           <BarChart3 className="h-4 w-4" />
           Words
         </Button>
+        <ProjectSettingsMenu
+          rootFilePath={project.rootFilePath}
+          files={files}
+          updating={updatingRootFile}
+          onRootFileChange={onRootFileChange}
+        />
         <div className="hidden items-center rounded-md border border-border p-0.5 md:flex">
           <Button variant={layout === "split" ? "secondary" : "ghost"} size="icon" title="Split view" onClick={() => onLayoutChange("split")}>
             <LayoutPanelLeft className="h-4 w-4" />

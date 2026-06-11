@@ -85,6 +85,110 @@ describe("projects and files", () => {
     expect(fileResponse.json<{ content: string }>().content).toContain("Updated");
   });
 
+  it("sets, validates, and preserves the project root document", async () => {
+    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Rooted" } });
+    const project = projectResponse.json<{ id: string; rootFilePath: string | null }>();
+    expect(project.rootFilePath).toBe("main.tex");
+
+    const createRootResponse = await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/files`,
+      payload: { path: "paper.tex", content: "\\documentclass{article}\\begin{document}Paper\\end{document}" }
+    });
+    expect(createRootResponse.statusCode).toBe(201);
+
+    const invalidRootResponse = await app.inject({
+      method: "PATCH",
+      url: `/api/projects/${project.id}`,
+      payload: { rootFilePath: "missing.tex" }
+    });
+    expect(invalidRootResponse.statusCode).toBe(404);
+
+    const nonTexRootResponse = await app.inject({
+      method: "PATCH",
+      url: `/api/projects/${project.id}`,
+      payload: { rootFilePath: "notes.txt" }
+    });
+    expect(nonTexRootResponse.statusCode).toBe(400);
+
+    const rootResponse = await app.inject({
+      method: "PATCH",
+      url: `/api/projects/${project.id}`,
+      payload: { rootFilePath: "paper.tex" }
+    });
+    expect(rootResponse.statusCode).toBe(200);
+    expect(rootResponse.json<{ rootFilePath: string }>().rootFilePath).toBe("paper.tex");
+
+    const paperFile = createRootResponse.json<{ id: string }>();
+    const renameResponse = await app.inject({
+      method: "PATCH",
+      url: `/api/projects/${project.id}/files/${paperFile.id}`,
+      payload: { path: "chapters/paper.tex" }
+    });
+    expect(renameResponse.statusCode).toBe(200);
+
+    const updatedProject = (await app.inject({ method: "GET", url: `/api/projects/${project.id}` })).json<{ rootFilePath: string }>();
+    expect(updatedProject.rootFilePath).toBe("chapters/paper.tex");
+  });
+
+  it("compiles the selected root document instead of assuming main.tex", async () => {
+    const fakeLatexmk = path.join(tmpDir, "fake-latexmk.sh");
+    await fs.writeFile(
+      fakeLatexmk,
+      [
+        "#!/bin/sh",
+        "for arg in \"$@\"; do root=\"$arg\"; done",
+        "base=\"${root%.tex}\"",
+        "mkdir -p \"$(dirname \"$base\")\"",
+        "printf '%s' PDF > \"$base.pdf\"",
+        "printf 'compiled %s\\n' \"$root\""
+      ].join("\n"),
+      "utf8"
+    );
+    await fs.chmod(fakeLatexmk, 0o755);
+    await app.close();
+    db.close();
+
+    config = getConfig({
+      dataDir: tmpDir,
+      databaseUrl: path.join(tmpDir, "test.sqlite"),
+      latexEngine: "latexmk",
+      latexmkBin: fakeLatexmk,
+      tectonicBin: "definitely-missing-tectonic",
+      webOrigin: "http://localhost:5173",
+      port: 0
+    });
+    db = createDb(config.databaseUrl);
+    app = buildApp(db, config);
+
+    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Compile Root" } });
+    const project = projectResponse.json<{ id: string }>();
+
+    const rootResponse = await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/files`,
+      payload: { path: "chapters/paper.tex", content: "\\documentclass{article}\\begin{document}Paper\\end{document}" }
+    });
+    expect(rootResponse.statusCode).toBe(201);
+
+    await app.inject({
+      method: "PATCH",
+      url: `/api/projects/${project.id}`,
+      payload: { rootFilePath: "chapters/paper.tex" }
+    });
+
+    const compileResponse = await app.inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
+    expect(compileResponse.statusCode).toBe(200);
+    expect(compileResponse.json<{ status: string; stdout: string; pdfPath: string }>())
+      .toEqual(expect.objectContaining({ status: "success", stdout: expect.stringContaining("compiled chapters/paper.tex") }));
+
+    const pdfResponse = await app.inject({ method: "GET", url: `/api/projects/${project.id}/pdf` });
+    expect(pdfResponse.statusCode).toBe(200);
+    expect(pdfResponse.rawPayload.toString("utf8")).toBe("PDF");
+    await expect(fs.stat(path.join(tmpDir, "projects", project.id, "main.pdf"))).rejects.toThrow();
+    await expect(fs.stat(path.join(tmpDir, "projects", project.id, "chapters", "paper.pdf"))).resolves.toBeDefined();
+  });
+
   it("creates parent folder metadata for nested files", async () => {
     const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Nested" } });
     const project = projectResponse.json<{ id: string }>();

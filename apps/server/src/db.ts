@@ -6,6 +6,7 @@ export type ProjectRow = {
   id: string;
   ownerId: string;
   name: string;
+  rootFilePath: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -80,6 +81,7 @@ export function createDb(databaseUrl: string) {
       id TEXT PRIMARY KEY,
       owner_id TEXT NOT NULL REFERENCES users(id),
       name TEXT NOT NULL,
+      root_file_path TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -125,6 +127,7 @@ export function createDb(databaseUrl: string) {
   `);
 
   ensureColumn(db, "compile_jobs", "diagnostics", "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(db, "projects", "root_file_path", "TEXT");
 
   db.prepare(
     "INSERT OR IGNORE INTO users (id, email, display_name, created_at) VALUES (?, ?, ?, ?)"
@@ -133,22 +136,27 @@ export function createDb(databaseUrl: string) {
   return {
     close: () => db.close(),
     listProjects(): ProjectRow[] {
-      return db.prepare("SELECT id, owner_id as ownerId, name, created_at as createdAt, updated_at as updatedAt FROM projects ORDER BY updated_at DESC").all() as ProjectRow[];
+      return db.prepare("SELECT id, owner_id as ownerId, name, root_file_path as rootFilePath, created_at as createdAt, updated_at as updatedAt FROM projects ORDER BY updated_at DESC").all() as ProjectRow[];
     },
     getProject(id: string): ProjectRow | undefined {
-      return db.prepare("SELECT id, owner_id as ownerId, name, created_at as createdAt, updated_at as updatedAt FROM projects WHERE id = ?").get(id) as ProjectRow | undefined;
+      return db.prepare("SELECT id, owner_id as ownerId, name, root_file_path as rootFilePath, created_at as createdAt, updated_at as updatedAt FROM projects WHERE id = ?").get(id) as ProjectRow | undefined;
     },
     createProject(project: ProjectRow): void {
-      db.prepare("INSERT INTO projects (id, owner_id, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run(
+      db.prepare("INSERT INTO projects (id, owner_id, name, root_file_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)").run(
         project.id,
         project.ownerId,
         project.name,
+        project.rootFilePath,
         project.createdAt,
         project.updatedAt
       );
     },
     updateProject(id: string, name: string, updatedAt: string): boolean {
       const result = db.prepare("UPDATE projects SET name = ?, updated_at = ? WHERE id = ?").run(name, updatedAt, id);
+      return result.changes > 0;
+    },
+    updateProjectRootFile(projectId: string, rootFilePath: string | null, updatedAt: string): boolean {
+      const result = db.prepare("UPDATE projects SET root_file_path = ?, updated_at = ? WHERE id = ?").run(rootFilePath, updatedAt, projectId);
       return result.changes > 0;
     },
     deleteProject(id: string): boolean {
@@ -174,9 +182,18 @@ export function createDb(databaseUrl: string) {
       );
     },
     renameFile(projectId: string, fileId: string, nextPath: string, updatedAt: string): boolean {
-      const result = db.prepare("UPDATE files SET path = ?, updated_at = ? WHERE project_id = ? AND id = ?").run(nextPath, updatedAt, projectId, fileId);
-      db.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").run(updatedAt, projectId);
-      return result.changes > 0;
+      const transaction = db.transaction(() => {
+        const existing = db.prepare("SELECT path FROM files WHERE project_id = ? AND id = ?").get(projectId, fileId) as { path: string } | undefined;
+        const result = db.prepare("UPDATE files SET path = ?, updated_at = ? WHERE project_id = ? AND id = ?").run(nextPath, updatedAt, projectId, fileId);
+        if (existing) {
+          db.prepare("UPDATE projects SET root_file_path = CASE WHEN root_file_path = ? THEN ? ELSE root_file_path END, updated_at = ? WHERE id = ?").run(existing.path, nextPath, updatedAt, projectId);
+        } else {
+          db.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").run(updatedAt, projectId);
+        }
+        return result.changes > 0;
+      });
+
+      return transaction();
     },
     updateFileTimestamp(projectId: string, fileId: string, updatedAt: string): boolean {
       const result = db.prepare("UPDATE files SET updated_at = ? WHERE project_id = ? AND id = ?").run(updatedAt, projectId, fileId);
@@ -184,8 +201,16 @@ export function createDb(databaseUrl: string) {
       return result.changes > 0;
     },
     deleteFile(projectId: string, fileId: string): boolean {
-      const result = db.prepare("DELETE FROM files WHERE project_id = ? AND id = ?").run(projectId, fileId);
-      return result.changes > 0;
+      const transaction = db.transaction(() => {
+        const existing = db.prepare("SELECT path FROM files WHERE project_id = ? AND id = ?").get(projectId, fileId) as { path: string } | undefined;
+        const result = db.prepare("DELETE FROM files WHERE project_id = ? AND id = ?").run(projectId, fileId);
+        if (existing) {
+          db.prepare("UPDATE projects SET root_file_path = CASE WHEN root_file_path = ? THEN NULL ELSE root_file_path END, updated_at = ? WHERE id = ?").run(existing.path, new Date().toISOString(), projectId);
+        }
+        return result.changes > 0;
+      });
+
+      return transaction();
     },
     listFolders(projectId: string): FolderRow[] {
       return db.prepare("SELECT id, project_id as projectId, path, created_at as createdAt, updated_at as updatedAt FROM folders WHERE project_id = ? ORDER BY path ASC").all(projectId) as FolderRow[];
@@ -220,6 +245,13 @@ export function createDb(databaseUrl: string) {
           db.prepare("UPDATE files SET path = ?, updated_at = ? WHERE id = ?").run(file.path.replace(`${oldPath}/`, `${nextPath}/`), updatedAt, file.id);
         }
 
+        db.prepare("UPDATE projects SET root_file_path = ? || substr(root_file_path, ?), updated_at = ? WHERE id = ? AND root_file_path LIKE ?").run(
+          nextPath,
+          oldPath.length + 1,
+          updatedAt,
+          projectId,
+          `${oldPath}/%`
+        );
         db.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").run(updatedAt, projectId);
         return result.changes > 0;
       });
@@ -230,7 +262,7 @@ export function createDb(databaseUrl: string) {
       const transaction = db.transaction(() => {
         const result = db.prepare("DELETE FROM folders WHERE project_id = ? AND (id = ? OR path LIKE ?)").run(projectId, folderId, `${folderPath}/%`);
         db.prepare("DELETE FROM files WHERE project_id = ? AND path LIKE ?").run(projectId, `${folderPath}/%`);
-        db.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").run(new Date().toISOString(), projectId);
+        db.prepare("UPDATE projects SET root_file_path = CASE WHEN root_file_path LIKE ? THEN NULL ELSE root_file_path END, updated_at = ? WHERE id = ?").run(`${folderPath}/%`, new Date().toISOString(), projectId);
         return result.changes > 0;
       });
 

@@ -2,6 +2,7 @@ export type Project = {
   id: string;
   ownerId: string;
   name: string;
+  rootFilePath: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -162,6 +163,12 @@ export const api = {
     return request<Project>(`/api/projects/${projectId}`, {
       method: "PATCH",
       body: JSON.stringify({ name })
+    });
+  },
+  updateProjectRootFile(projectId: string, rootFilePath: string | null) {
+    return request<Project>(`/api/projects/${projectId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ rootFilePath })
     });
   },
   deleteProject(projectId: string) {

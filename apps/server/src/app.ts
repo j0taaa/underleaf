@@ -13,7 +13,7 @@ import { resolveTemplate, templates } from "./templates.js";
 
 type CreateProjectBody = { name?: string; template?: string };
 type ImportProjectQuery = { name?: string };
-type UpdateProjectBody = { name?: string };
+type UpdateProjectBody = { name?: string; rootFilePath?: string | null };
 type CreateFileBody = { path?: string; content?: string };
 type UpdateFileBody = { content?: string };
 type RenamePathBody = { path?: string };
@@ -80,14 +80,15 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
 
   app.post<{ Body: CreateProjectBody }>("/api/projects", async (request, reply) => {
     const now = new Date().toISOString();
+    const template = templates[resolveTemplate(request.body.template)];
     const project = {
       id: nanoid(),
       ownerId: "local-user",
       name: request.body.name?.trim() || "Untitled Project",
+      rootFilePath: templateRootFile(Object.keys(template.files)),
       createdAt: now,
       updatedAt: now
     };
-    const template = templates[resolveTemplate(request.body.template)];
     const root = projectRoot(config.dataDir, project.id);
 
     await fs.mkdir(root, { recursive: true });
@@ -126,11 +127,25 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.patch<{ Params: { projectId: string }; Body: UpdateProjectBody }>("/api/projects/:projectId", async (request, reply) => {
-    const name = request.body.name?.trim();
-    if (!name) return reply.code(400).send({ message: "Project name is required" });
+    const project = db.getProject(request.params.projectId);
+    if (!project) return reply.code(404).send({ message: "Project not found" });
 
-    const updated = db.updateProject(request.params.projectId, name, new Date().toISOString());
-    if (!updated) return reply.code(404).send({ message: "Project not found" });
+    if (Object.prototype.hasOwnProperty.call(request.body, "name")) {
+      const name = request.body.name?.trim();
+      if (!name) return reply.code(400).send({ message: "Project name is required" });
+      db.updateProject(request.params.projectId, name, new Date().toISOString());
+    }
+
+    if (Object.prototype.hasOwnProperty.call(request.body, "rootFilePath")) {
+      if (request.body.rootFilePath === null) {
+        db.updateProjectRootFile(request.params.projectId, null, new Date().toISOString());
+      } else {
+        const rootFilePath = validateRootFilePath(db, request.params.projectId, request.body.rootFilePath);
+        if (!rootFilePath.ok) return reply.code(rootFilePath.statusCode).send({ message: rootFilePath.message });
+        db.updateProjectRootFile(request.params.projectId, rootFilePath.path, new Date().toISOString());
+      }
+    }
+
     return db.getProject(request.params.projectId);
   });
 
@@ -496,10 +511,12 @@ async function runCompile(db: UnderleafDb, config: ServerConfig, projectId: stri
 
   db.createCompileJob(job);
   const startedAt = Date.now();
+  const rootFilePath = resolveCompileRootFile(db, projectId);
 
   try {
-    const result = await spawnCompiler(config, root);
-    const pdfPath = path.join(root, "main.pdf");
+    if (!rootFilePath) throw new Error("No LaTeX root document found. Choose a .tex root file in project settings.");
+    const result = await spawnCompiler(config, root, rootFilePath);
+    const pdfPath = path.join(root, replaceTexExtension(rootFilePath, ".pdf"));
     const hasPdf = await fs.stat(pdfPath).then((stat) => stat.isFile()).catch(() => false);
 
     job.status = result.code === 0 && hasPdf ? "success" : "error";
@@ -510,7 +527,7 @@ async function runCompile(db: UnderleafDb, config: ServerConfig, projectId: stri
     job.status = "error";
     job.stderr = error instanceof Error ? error.message : String(error);
   } finally {
-    job.diagnostics = parseCompileDiagnostics(`${job.stdout}\n${job.stderr}`, db.listFiles(projectId));
+    job.diagnostics = parseCompileDiagnostics(`${job.stdout}\n${job.stderr}`, db.listFiles(projectId), rootFilePath);
     job.durationMs = Date.now() - startedAt;
     job.updatedAt = new Date().toISOString();
     db.updateCompileJob(job);
@@ -519,22 +536,70 @@ async function runCompile(db: UnderleafDb, config: ServerConfig, projectId: stri
   return job;
 }
 
-async function spawnCompiler(config: ServerConfig, cwd: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function validateRootFilePath(
+  db: UnderleafDb,
+  projectId: string,
+  rawPath: string | undefined
+): { ok: true; path: string } | { ok: false; statusCode: 400 | 404; message: string } {
+  let safePath: string;
+  try {
+    safePath = normalizeProjectPath(rawPath ?? "");
+  } catch {
+    return { ok: false, statusCode: 400, message: "Invalid root document path" };
+  }
+
+  if (!safePath.toLowerCase().endsWith(".tex")) {
+    return { ok: false, statusCode: 400, message: "Root document must be a .tex file" };
+  }
+
+  if (!db.getFileByPath(projectId, safePath)) {
+    return { ok: false, statusCode: 404, message: "Root document file was not found" };
+  }
+
+  return { ok: true, path: safePath };
+}
+
+function resolveCompileRootFile(db: UnderleafDb, projectId: string): string | null {
+  const project = db.getProject(projectId);
+  if (!project) return null;
+
+  if (project.rootFilePath) {
+    return db.getFileByPath(projectId, project.rootFilePath) ? project.rootFilePath : null;
+  }
+
+  return detectRootFilePath(db.listFiles(projectId));
+}
+
+function detectRootFilePath(files: FileRow[]): string | null {
+  const texFiles = files.filter((file) => file.path.toLowerCase().endsWith(".tex")).sort(compareOutlineFiles);
+  return texFiles.find((file) => file.path === "main.tex")?.path ?? texFiles[0]?.path ?? null;
+}
+
+function templateRootFile(templatePaths: string[]): string | null {
+  const files = templatePaths.map((templatePath) => ({ path: normalizeProjectPath(templatePath) }) as FileRow);
+  return detectRootFilePath(files);
+}
+
+function replaceTexExtension(filePath: string, extension: string): string {
+  return filePath.replace(/\.tex$/i, extension);
+}
+
+async function spawnCompiler(config: ServerConfig, cwd: string, rootFilePath: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
   if (config.latexEngine === "latexmk") {
-    return spawnCommand(config.latexmkBin, ["-pdf", "-synctex=1", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", "main.tex"], cwd);
+    return spawnCommand(config.latexmkBin, ["-pdf", "-synctex=1", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", rootFilePath], cwd);
   }
 
   if (config.latexEngine === "tectonic") {
-    return spawnCommand(config.tectonicBin, ["--keep-logs", "--keep-intermediates", "--synctex", "main.tex"], cwd);
+    return spawnCommand(config.tectonicBin, ["--keep-logs", "--keep-intermediates", "--synctex", rootFilePath], cwd);
   }
 
   try {
-    return await spawnCommand(config.latexmkBin, ["-pdf", "-synctex=1", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", "main.tex"], cwd);
+    return await spawnCommand(config.latexmkBin, ["-pdf", "-synctex=1", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", rootFilePath], cwd);
   } catch (error) {
     if (!isMissingCommandError(error)) throw error;
 
     try {
-      const tectonicResult = await spawnCommand(config.tectonicBin, ["--keep-logs", "--keep-intermediates", "--synctex", "main.tex"], cwd);
+      const tectonicResult = await spawnCommand(config.tectonicBin, ["--keep-logs", "--keep-intermediates", "--synctex", rootFilePath], cwd);
       tectonicResult.stderr = [
         `latexmk was not found, so Underleaf used tectonic (${config.tectonicBin}) instead.`,
         tectonicResult.stderr
@@ -553,11 +618,11 @@ function isMissingCommandError(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
-function parseCompileDiagnostics(output: string, files: FileRow[]): CompileDiagnosticRow[] {
+function parseCompileDiagnostics(output: string, files: FileRow[], rootFilePath: string | null): CompileDiagnosticRow[] {
   const lines = output.replace(/\r\n/g, "\n").split("\n");
   const diagnostics: CompileDiagnosticRow[] = [];
   const knownPaths = new Set(files.map((file) => file.path));
-  const mainPath = knownPaths.has("main.tex") ? "main.tex" : files.find((file) => file.path.endsWith(".tex"))?.path ?? null;
+  const mainPath = rootFilePath && knownPaths.has(rootFilePath) ? rootFilePath : knownPaths.has("main.tex") ? "main.tex" : files.find((file) => file.path.endsWith(".tex"))?.path ?? null;
   const recentFiles: string[] = [];
 
   const pushDiagnostic = (diagnostic: CompileDiagnosticRow) => {
@@ -809,16 +874,10 @@ async function createProjectArchiveSource(db: UnderleafDb, config: ServerConfig,
 
 async function importProjectArchive(db: UnderleafDb, config: ServerConfig, archive: Buffer, filename: string, requestedName: string | undefined): Promise<ProjectRow> {
   const now = new Date().toISOString();
-  const project: ProjectRow = {
-    id: nanoid(),
-    ownerId: "local-user",
-    name: requestedName?.trim() || archiveProjectName(filename),
-    createdAt: now,
-    updatedAt: now
-  };
   const importRoot = await fs.mkdtemp(path.join(os.tmpdir(), "underleaf-import-"));
   const archivePath = path.join(importRoot, filename || "project.tar.gz");
   const extractRoot = path.join(importRoot, "source");
+  const projectId = nanoid();
 
   try {
     await fs.mkdir(extractRoot, { recursive: true });
@@ -827,6 +886,15 @@ async function importProjectArchive(db: UnderleafDb, config: ServerConfig, archi
 
     const files = await collectImportedFiles(extractRoot);
     if (files.length === 0) throw new Error("Archive does not contain any importable files");
+
+    const project: ProjectRow = {
+      id: projectId,
+      ownerId: "local-user",
+      name: requestedName?.trim() || archiveProjectName(filename),
+      rootFilePath: detectRootFilePath(files.map((file) => ({ path: file.path }) as FileRow)),
+      createdAt: now,
+      updatedAt: now
+    };
 
     await fs.mkdir(projectRoot(config.dataDir, project.id), { recursive: true });
     db.createProject(project);
@@ -844,8 +912,8 @@ async function importProjectArchive(db: UnderleafDb, config: ServerConfig, archi
 
     return project;
   } catch (error) {
-    if (db.getProject(project.id)) db.deleteProject(project.id);
-    await fs.rm(projectRoot(config.dataDir, project.id), { recursive: true, force: true });
+    if (db.getProject(projectId)) db.deleteProject(projectId);
+    await fs.rm(projectRoot(config.dataDir, projectId), { recursive: true, force: true });
     throw error;
   } finally {
     await fs.rm(importRoot, { recursive: true, force: true });
@@ -973,6 +1041,10 @@ async function restoreProjectSnapshot(db: UnderleafDb, config: ServerConfig, pro
     updatedAt: now
   }));
   db.replaceProjectTree(projectId, restoredFiles, restoredFolders, now);
+  const project = db.getProject(projectId);
+  if (project?.rootFilePath && !restoredFiles.some((file) => file.path === project.rootFilePath)) {
+    db.updateProjectRootFile(projectId, detectRootFilePath(restoredFiles), now);
+  }
   await removeEmptyProjectDirs(root, new Set([".underleaf-snapshots"]));
 }
 
