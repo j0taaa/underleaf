@@ -7,6 +7,7 @@ import { EditorLayout } from "../components/editor/EditorLayout";
 import { FileSidebar } from "../components/editor/FileSidebar";
 import { HistoryPanel } from "../components/editor/HistoryPanel";
 import { SourceControlPanel } from "../components/editor/SourceControlPanel";
+import { WordCountPanel } from "../components/editor/WordCountPanel";
 import { cn } from "../lib/utils";
 import type { LayoutMode, SaveState } from "../types/editor";
 
@@ -42,6 +43,7 @@ export function ProjectEditorPage() {
   const [sourceTarget, setSourceTarget] = useState<{ fileId: string; line: number; column: number; nonce: number } | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [sourceControlOpen, setSourceControlOpen] = useState(false);
+  const [wordCountOpen, setWordCountOpen] = useState(false);
   const [snapshotLabel, setSnapshotLabel] = useState("");
   const [commitMessage, setCommitMessage] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -90,6 +92,12 @@ export function ProjectEditorPage() {
     refetchInterval: sourceControlOpen ? 3000 : false
   });
 
+  const wordCountQuery = useQuery({
+    queryKey: ["project-word-count", projectId],
+    queryFn: () => api.wordCount(projectId),
+    enabled: wordCountOpen
+  });
+
   const project = projectQuery.data ?? null;
   const files = filesQuery.data ?? [];
   const folders = foldersQuery.data ?? [];
@@ -104,6 +112,10 @@ export function ProjectEditorPage() {
 
   const invalidateOutline = async () => {
     await queryClient.invalidateQueries({ queryKey: ["project-outline", projectId] });
+  };
+
+  const invalidateWordCount = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["project-word-count", projectId] });
   };
 
   useEffect(() => {
@@ -155,7 +167,7 @@ export function ProjectEditorPage() {
       queryClient.setQueryData(["project-file", projectId, saved.id], saved);
       setActiveFile(saved);
       setSaveState("saved");
-      await Promise.all([invalidateGitStatus(), invalidateOutline()]);
+      await Promise.all([invalidateGitStatus(), invalidateOutline(), invalidateWordCount()]);
     },
     onError: () => setSaveState("error")
   });
@@ -166,7 +178,8 @@ export function ProjectEditorPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
         invalidateGitStatus(),
-        invalidateOutline()
+        invalidateOutline(),
+        invalidateWordCount()
       ]);
       await openFile(file);
     }
@@ -178,7 +191,8 @@ export function ProjectEditorPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
         invalidateGitStatus(),
-        invalidateOutline()
+        invalidateOutline(),
+        invalidateWordCount()
       ]);
       queryClient.setQueryData(["project-file", projectId, file.id], undefined);
       if (activeFile?.id === file.id) {
@@ -196,7 +210,8 @@ export function ProjectEditorPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
         invalidateGitStatus(),
-        invalidateOutline()
+        invalidateOutline(),
+        invalidateWordCount()
       ]);
     }
   });
@@ -207,7 +222,8 @@ export function ProjectEditorPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
         invalidateGitStatus(),
-        invalidateOutline()
+        invalidateOutline(),
+        invalidateWordCount()
       ]);
     }
   });
@@ -219,7 +235,8 @@ export function ProjectEditorPage() {
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
         invalidateGitStatus(),
-        invalidateOutline()
+        invalidateOutline(),
+        invalidateWordCount()
       ]);
       setActiveFile(null);
       setContent("");
@@ -233,7 +250,8 @@ export function ProjectEditorPage() {
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
         invalidateGitStatus(),
-        invalidateOutline()
+        invalidateOutline(),
+        invalidateWordCount()
       ]);
     }
   });
@@ -245,7 +263,8 @@ export function ProjectEditorPage() {
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
         invalidateGitStatus(),
-        invalidateOutline()
+        invalidateOutline(),
+        invalidateWordCount()
       ]);
     }
   });
@@ -269,7 +288,8 @@ export function ProjectEditorPage() {
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
         queryClient.invalidateQueries({ queryKey: ["project-snapshots", projectId] }),
         invalidateGitStatus(),
-        invalidateOutline()
+        invalidateOutline(),
+        invalidateWordCount()
       ]);
     }
   });
@@ -520,16 +540,23 @@ export function ProjectEditorPage() {
         onRenameSubmit={() => void renameProject()}
         onHistoryToggle={() => {
           setSourceControlOpen(false);
+          setWordCountOpen(false);
           setHistoryOpen((current) => !current);
         }}
         onSourceControlToggle={() => {
           setHistoryOpen(false);
+          setWordCountOpen(false);
           setSourceControlOpen((current) => !current);
+        }}
+        onWordCountToggle={() => {
+          setHistoryOpen(false);
+          setSourceControlOpen(false);
+          setWordCountOpen((current) => !current);
         }}
         onLayoutChange={setLayout}
         onCompile={() => void compile()}
       />
-      <div className={cn("grid min-h-0 flex-1 grid-cols-1", historyOpen || sourceControlOpen ? "md:grid-cols-[260px_minmax(0,1fr)_320px]" : "md:grid-cols-[260px_minmax(0,1fr)]")}>
+      <div className={cn("grid min-h-0 flex-1 grid-cols-1", historyOpen || sourceControlOpen || wordCountOpen ? "md:grid-cols-[260px_minmax(0,1fr)_320px]" : "md:grid-cols-[260px_minmax(0,1fr)]")}>
         <FileSidebar
           files={files}
           folders={folders}
@@ -590,6 +617,14 @@ export function ProjectEditorPage() {
             onCommit={() => void commitGit()}
             onRefresh={() => void gitStatusQuery.refetch()}
             onClose={() => setSourceControlOpen(false)}
+          />
+        )}
+        {wordCountOpen && (
+          <WordCountPanel
+            count={wordCountQuery.data ?? null}
+            loading={wordCountQuery.isPending}
+            onRefresh={() => void wordCountQuery.refetch()}
+            onClose={() => setWordCountOpen(false)}
           />
         )}
       </div>

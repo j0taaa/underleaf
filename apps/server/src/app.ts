@@ -37,6 +37,11 @@ type ProjectOutlineItem = {
   kind: string;
   title: string;
 };
+type ProjectWordCount = {
+  words: number;
+  characters: number;
+  files: Array<{ fileId: string; path: string; words: number; characters: number }>;
+};
 type GitStatusResult = {
   initialized: boolean;
   branch: string | null;
@@ -171,6 +176,11 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/outline", async (request, reply) => {
     if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
     return buildProjectOutline(db, config, request.params.projectId);
+  });
+
+  app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/word-count", async (request, reply) => {
+    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    return countProjectWords(db, config, request.params.projectId);
   });
 
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/git/status", async (request, reply) => {
@@ -1182,6 +1192,68 @@ function compareOutlineFiles(left: FileRow, right: FileRow): number {
   if (left.path === "main.tex") return -1;
   if (right.path === "main.tex") return 1;
   return left.path.localeCompare(right.path);
+}
+
+async function countProjectWords(db: UnderleafDb, config: ServerConfig, projectId: string): Promise<ProjectWordCount> {
+  const root = path.resolve(projectRoot(config.dataDir, projectId));
+  const files: ProjectWordCount["files"] = [];
+
+  for (const file of db.listFiles(projectId).sort(compareOutlineFiles)) {
+    if (!isLatexSourceFile(file.path) && path.posix.extname(file.path).toLowerCase() !== ".bib") continue;
+
+    const absoluteFile = path.resolve(root, normalizeProjectPath(file.path));
+    if (!absoluteFile.startsWith(root)) continue;
+
+    const stat = await fs.stat(absoluteFile).catch(() => null);
+    if (!stat?.isFile() || stat.size > 1024 * 1024) continue;
+
+    const content = await fs.readFile(absoluteFile, "utf8").catch(() => "");
+    if (content.includes("\u0000")) continue;
+
+    const text = latexToCountableText(content);
+    files.push({
+      fileId: file.id,
+      path: file.path,
+      words: countWords(text),
+      characters: countCharacters(text)
+    });
+  }
+
+  return {
+    words: files.reduce((sum, file) => sum + file.words, 0),
+    characters: files.reduce((sum, file) => sum + file.characters, 0),
+    files
+  };
+}
+
+function latexToCountableText(content: string): string {
+  const withoutComments = content
+    .split(/\r?\n/)
+    .map(stripLatexLineComment)
+    .join("\n");
+
+  return withoutComments
+    .replace(/\\(?:documentclass|usepackage|input|include|bibliography|bibliographystyle|label|ref|pageref|cite[a-zA-Z]*|url|href)\*?(?:\[[^\]]*])?(?:\{[^{}]*}){1,2}/g, " ")
+    .replace(/\\(?:begin|end)\s*\{[^{}]*}/g, " ")
+    .replace(/\$\$[\s\S]*?\$\$/g, " ")
+    .replace(/\$[^$\n]*\$/g, " ")
+    .replace(/\\\[[\s\S]*?\\]/g, " ")
+    .replace(/\\\([\s\S]*?\\\)/g, " ")
+    .replace(/\\[A-Za-z]+\*?(?:\[[^\]]*])?\{([^{}]*)}/g, " $1 ")
+    .replace(/\\[A-Za-z]+\*?/g, " ")
+    .replace(/\\./g, " ")
+    .replace(/[{}_^&~#$]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function countWords(text: string): number {
+  const matches = text.match(/[\p{L}\p{N}]+(?:[-'][\p{L}\p{N}]+)*/gu);
+  return matches?.length ?? 0;
+}
+
+function countCharacters(text: string): number {
+  return text.replace(/\s+/g, "").length;
 }
 
 async function getProjectGitStatus(config: ServerConfig, projectId: string): Promise<GitStatusResult> {

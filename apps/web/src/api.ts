@@ -44,6 +44,12 @@ export type ProjectOutlineItem = {
   title: string;
 };
 
+export type ProjectWordCount = {
+  words: number;
+  characters: number;
+  files: Array<{ fileId: string; path: string; words: number; characters: number }>;
+};
+
 export type GitStatus = {
   initialized: boolean;
   branch: string | null;
@@ -167,6 +173,9 @@ export const api = {
   },
   outlineProject(projectId: string) {
     return request<ProjectOutlineItem[]>(`/api/projects/${projectId}/outline`);
+  },
+  wordCount(projectId: string) {
+    return request<ProjectWordCount>(`/api/projects/${projectId}/word-count`);
   },
   gitStatus(projectId: string) {
     return request<GitStatus>(`/api/projects/${projectId}/git/status`);

@@ -1,4 +1,4 @@
-import { ChevronLeft, Download, GitBranch, History, LayoutPanelLeft, Maximize2, PanelRightOpen, Pencil, Play } from "lucide-react";
+import { BarChart3, ChevronLeft, Download, GitBranch, History, LayoutPanelLeft, Maximize2, PanelRightOpen, Pencil, Play } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { api, type CompileJob, type Project, type ProjectFileWithContent } from "../../api";
 import type { LayoutMode } from "../../types/editor";
@@ -20,6 +20,7 @@ export function EditorHeader({
   onRenameSubmit,
   onHistoryToggle,
   onSourceControlToggle,
+  onWordCountToggle,
   onLayoutChange,
   onCompile
 }: {
@@ -36,6 +37,7 @@ export function EditorHeader({
   onRenameSubmit: () => void;
   onHistoryToggle: () => void;
   onSourceControlToggle: () => void;
+  onWordCountToggle: () => void;
   onLayoutChange: (layout: LayoutMode) => void;
   onCompile: () => void;
 }) {
@@ -93,6 +95,10 @@ export function EditorHeader({
         <Button variant="outline" size="sm" title="Source control" onClick={onSourceControlToggle}>
           <GitBranch className="h-4 w-4" />
           Git
+        </Button>
+        <Button variant="outline" size="sm" title="Word count" onClick={onWordCountToggle}>
+          <BarChart3 className="h-4 w-4" />
+          Words
         </Button>
         <div className="hidden items-center rounded-md border border-border p-0.5 md:flex">
           <Button variant={layout === "split" ? "secondary" : "ghost"} size="icon" title="Split view" onClick={() => onLayoutChange("split")}>

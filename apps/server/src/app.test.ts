@@ -284,6 +284,48 @@ describe("projects and files", () => {
     ]);
   });
 
+  it("counts project words while ignoring common LaTeX syntax", async () => {
+    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Counted" } });
+    const project = projectResponse.json<{ id: string }>();
+    const files = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
+    const mainFile = files.find((file) => file.path === "main.tex");
+    expect(mainFile).toBeDefined();
+
+    await app.inject({
+      method: "PUT",
+      url: `/api/projects/${project.id}/files/${mainFile?.id}/content`,
+      payload: {
+        content: [
+          "\\documentclass{article}",
+          "% Hidden comment words",
+          "\\begin{document}",
+          "\\section{Readable Heading}",
+          "First sentence has five words.",
+          "Math $x + y = z$ is ignored.",
+          "A \\textbf{bold claim} remains readable.",
+          "\\cite{smith2020} \\label{sec:intro}",
+          "\\end{document}"
+        ].join("\n")
+      }
+    });
+    await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/files`,
+      payload: { path: "chapters/method.tex", content: "\\subsection{Method}\nSecond file adds words." }
+    });
+
+    const response = await app.inject({ method: "GET", url: `/api/projects/${project.id}/word-count` });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<{ words: number; files: Array<{ path: string; words: number }> }>()).toMatchObject({
+      words: 20,
+      files: [
+        expect.objectContaining({ path: "main.tex", words: 15 }),
+        expect.objectContaining({ path: "chapters/method.tex", words: 5 })
+      ]
+    });
+  });
+
   it("exports and imports project archives", async () => {
     const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Archive Source" } });
     const project = projectResponse.json<{ id: string }>();
