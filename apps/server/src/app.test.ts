@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "./app.js";
 import { getConfig, type ServerConfig } from "./config.js";
@@ -10,6 +12,7 @@ let tmpDir: string;
 let db: UnderleafDb;
 let config: ServerConfig;
 let app: ReturnType<typeof buildApp>;
+const execFileAsync = promisify(execFile);
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "underleaf-test-"));
@@ -282,6 +285,51 @@ describe("projects and files", () => {
     const importedMain = importedFiles.find((file) => file.path === "main.tex");
     const importedMainResponse = await app.inject({ method: "GET", url: `/api/projects/${importedProject.id}/files/${importedMain?.id}` });
     expect(importedMainResponse.json<{ content: string }>().content).toContain("Exported source");
+  });
+
+  it("initializes git repositories and commits project changes", async () => {
+    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Versioned" } });
+    const project = projectResponse.json<{ id: string }>();
+    const files = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
+    const mainFile = files.find((file) => file.path === "main.tex");
+    expect(mainFile).toBeDefined();
+    await execFileAsync("git", ["init"], { cwd: tmpDir });
+
+    const initialStatus = await app.inject({ method: "GET", url: `/api/projects/${project.id}/git/status` });
+    expect(initialStatus.statusCode).toBe(200);
+    expect(initialStatus.json<{ initialized: boolean }>().initialized).toBe(false);
+
+    const initStatus = await app.inject({ method: "POST", url: `/api/projects/${project.id}/git/init` });
+    expect(initStatus.statusCode).toBe(200);
+    expect(initStatus.json<{ initialized: boolean; hasChanges: boolean; entries: Array<{ path: string }> }>()).toMatchObject({
+      initialized: true,
+      hasChanges: true
+    });
+    expect(initStatus.json<{ entries: Array<{ path: string }> }>().entries.map((entry) => entry.path)).toEqual(
+      expect.arrayContaining([".gitignore", "main.tex"])
+    );
+
+    const firstCommit = await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/git/commit`,
+      payload: { message: "Initial project" }
+    });
+    expect(firstCommit.statusCode).toBe(200);
+    expect(firstCommit.json<{ hasChanges: boolean; lastCommit: { subject: string } }>().hasChanges).toBe(false);
+    expect(firstCommit.json<{ lastCommit: { subject: string } }>().lastCommit.subject).toBe("Initial project");
+
+    await app.inject({
+      method: "PUT",
+      url: `/api/projects/${project.id}/files/${mainFile?.id}/content`,
+      payload: { content: "\\documentclass{article}\n\\begin{document}\nGit changed this.\n\\end{document}" }
+    });
+
+    const dirtyStatus = await app.inject({ method: "GET", url: `/api/projects/${project.id}/git/status` });
+    expect(dirtyStatus.statusCode).toBe(200);
+    expect(dirtyStatus.json<{ hasChanges: boolean; entries: Array<{ path: string; status: string }> }>()).toMatchObject({
+      hasChanges: true,
+      entries: [expect.objectContaining({ path: "main.tex" })]
+    });
   });
 
   it("creates and restores project snapshots", async () => {

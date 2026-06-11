@@ -17,6 +17,7 @@ type UpdateProjectBody = { name?: string };
 type CreateFileBody = { path?: string; content?: string };
 type UpdateFileBody = { content?: string };
 type RenamePathBody = { path?: string };
+type GitCommitBody = { message?: string };
 type ProjectSearchQuery = { q?: string };
 type PdfSourceBody = { page?: number; x?: number; y?: number; text?: string };
 type CreateSnapshotBody = { label?: string };
@@ -26,6 +27,13 @@ type ProjectSearchResult = {
   line: number;
   column: number;
   preview: string;
+};
+type GitStatusResult = {
+  initialized: boolean;
+  branch: string | null;
+  lastCommit: { hash: string; subject: string; committedAt: string } | null;
+  hasChanges: boolean;
+  entries: Array<{ path: string; status: string }>;
 };
 type SnapshotManifest = {
   id: string;
@@ -149,6 +157,31 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
     if (query.length > 120) return reply.code(400).send({ message: "Search query is too long" });
 
     return searchProjectFiles(db, config, request.params.projectId, query);
+  });
+
+  app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/git/status", async (request, reply) => {
+    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    return getProjectGitStatus(config, request.params.projectId);
+  });
+
+  app.post<{ Params: { projectId: string } }>("/api/projects/:projectId/git/init", async (request, reply) => {
+    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    await initProjectGit(config, request.params.projectId);
+    return getProjectGitStatus(config, request.params.projectId);
+  });
+
+  app.post<{ Params: { projectId: string }; Body: GitCommitBody }>("/api/projects/:projectId/git/commit", async (request, reply) => {
+    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+
+    const message = request.body.message?.trim();
+    if (!message) return reply.code(400).send({ message: "Commit message is required" });
+
+    try {
+      await commitProjectGit(config, request.params.projectId, message);
+    } catch (error) {
+      return reply.code(400).send({ message: error instanceof Error ? error.message : "Unable to commit project" });
+    }
+    return getProjectGitStatus(config, request.params.projectId);
   });
 
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/snapshots", async (request, reply) => {
@@ -1027,6 +1060,121 @@ function normalizeSearchText(value: string): string {
   return value.toLowerCase().replace(/\\[a-z]+\*?/g, " ").replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ");
 }
 
+async function getProjectGitStatus(config: ServerConfig, projectId: string): Promise<GitStatusResult> {
+  const root = projectRoot(config.dataDir, projectId);
+  if (!(await isGitRepository(root))) {
+    return { initialized: false, branch: null, lastCommit: null, hasChanges: false, entries: [] };
+  }
+
+  const [branchResult, lastCommitResult, statusResult] = await Promise.all([
+    spawnGit(root, ["branch", "--show-current"]),
+    spawnGit(root, ["log", "-1", "--pretty=%h%x09%s%x09%cI"]),
+    spawnGit(root, ["status", "--short"])
+  ]);
+
+  const entries = parseGitStatusEntries(statusResult.stdout);
+  return {
+    initialized: true,
+    branch: branchResult.stdout.trim() || "HEAD",
+    lastCommit: parseGitLastCommit(lastCommitResult.stdout),
+    hasChanges: entries.length > 0,
+    entries
+  };
+}
+
+async function initProjectGit(config: ServerConfig, projectId: string): Promise<void> {
+  const root = projectRoot(config.dataDir, projectId);
+  await runGitOrThrow(root, ["init"]);
+  await ensureProjectGitignore(root);
+}
+
+async function commitProjectGit(config: ServerConfig, projectId: string, message: string): Promise<void> {
+  const root = projectRoot(config.dataDir, projectId);
+  if (!(await isGitRepository(root))) await initProjectGit(config, projectId);
+
+  await runGitOrThrow(root, ["add", "-A", "."]);
+  const status = await getProjectGitStatus(config, projectId);
+  if (!status.hasChanges) throw new Error("No changes to commit");
+
+  await runGitOrThrow(root, ["commit", "-m", message], {
+    GIT_AUTHOR_NAME: "Underleaf",
+    GIT_AUTHOR_EMAIL: "underleaf@local.invalid",
+    GIT_COMMITTER_NAME: "Underleaf",
+    GIT_COMMITTER_EMAIL: "underleaf@local.invalid"
+  });
+}
+
+async function isGitRepository(root: string): Promise<boolean> {
+  const gitDir = await fs.stat(path.join(root, ".git")).catch(() => null);
+  if (!gitDir) return false;
+
+  const result = await spawnGit(root, ["rev-parse", "--show-toplevel"]).catch(() => null);
+  if (result?.code !== 0) return false;
+  const [reportedRoot, expectedRoot] = await Promise.all([
+    fs.realpath(result.stdout.trim()).catch(() => path.resolve(result.stdout.trim())),
+    fs.realpath(root).catch(() => path.resolve(root))
+  ]);
+  return reportedRoot === expectedRoot;
+}
+
+async function ensureProjectGitignore(root: string): Promise<void> {
+  const gitignorePath = path.join(root, ".gitignore");
+  const existing = await fs.readFile(gitignorePath, "utf8").catch(() => "");
+  const needed = [
+    ".underleaf-snapshots/",
+    "*.aux",
+    "*.bbl",
+    "*.bcf",
+    "*.blg",
+    "*.fdb_latexmk",
+    "*.fls",
+    "*.log",
+    "*.out",
+    "*.pdf",
+    "*.run.xml",
+    "*.synctex.gz",
+    "*.toc"
+  ];
+  const missing = needed.filter((entry) => !existing.split(/\r?\n/).includes(entry));
+  if (existing && missing.length === 0) return;
+
+  await fs.writeFile(gitignorePath, [existing.trimEnd(), ...missing].filter(Boolean).join("\n") + "\n", "utf8");
+}
+
+async function runGitOrThrow(root: string, args: string[], env: NodeJS.ProcessEnv = {}): Promise<{ stdout: string; stderr: string }> {
+  const result = await spawnGit(root, args, env);
+  if (result.code !== 0) throw new Error(result.stderr.trim() || result.stdout.trim() || `git ${args.join(" ")} failed`);
+  return { stdout: result.stdout, stderr: result.stderr };
+}
+
+function spawnGit(root: string, args: string[], env: NodeJS.ProcessEnv = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  const projectRootPath = path.resolve(root);
+  return spawnCommand("git", args, projectRootPath, {
+    GIT_CEILING_DIRECTORIES: path.dirname(projectRootPath),
+    ...env
+  });
+}
+
+function parseGitStatusEntries(output: string): Array<{ path: string; status: string }> {
+  return output.split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .map((line) => {
+      const status = line.slice(0, 2).trim() || line.slice(0, 2);
+      const rawPath = line.slice(3).trim();
+      const renamedPath = rawPath.includes(" -> ") ? rawPath.split(" -> ").at(-1) ?? rawPath : rawPath;
+      return { status, path: renamedPath.replace(/^"|"$/g, "") };
+    });
+}
+
+function parseGitLastCommit(output: string): GitStatusResult["lastCommit"] {
+  const trimmed = output.trim();
+  if (!trimmed) return null;
+  const [hash, subject, committedAt] = trimmed.split("\t");
+  if (!hash || !subject || !committedAt) return null;
+  return { hash, subject, committedAt };
+}
+
 async function searchProjectFiles(db: UnderleafDb, config: ServerConfig, projectId: string, query: string): Promise<ProjectSearchResult[]> {
   const root = path.resolve(projectRoot(config.dataDir, projectId));
   const needle = query.toLowerCase();
@@ -1070,11 +1218,11 @@ function isSearchableFile(filePath: string): boolean {
   return new Set([".bib", ".cls", ".csv", ".md", ".sty", ".tex", ".txt"]).has(extension);
 }
 
-function spawnCommand(bin: string, args: string[], cwd: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function spawnCommand(bin: string, args: string[], cwd: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args, {
       cwd,
-      env: process.env
+      env: { ...process.env, ...extraEnv }
     });
     let stdout = "";
     let stderr = "";

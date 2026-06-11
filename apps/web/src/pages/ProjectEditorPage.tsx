@@ -6,6 +6,7 @@ import { EditorHeader } from "../components/editor/EditorHeader";
 import { EditorLayout } from "../components/editor/EditorLayout";
 import { FileSidebar } from "../components/editor/FileSidebar";
 import { HistoryPanel } from "../components/editor/HistoryPanel";
+import { SourceControlPanel } from "../components/editor/SourceControlPanel";
 import { cn } from "../lib/utils";
 import type { LayoutMode, SaveState } from "../types/editor";
 
@@ -40,7 +41,9 @@ export function ProjectEditorPage() {
   const [projectName, setProjectName] = useState("");
   const [sourceTarget, setSourceTarget] = useState<{ fileId: string; line: number; column: number; nonce: number } | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [sourceControlOpen, setSourceControlOpen] = useState(false);
   const [snapshotLabel, setSnapshotLabel] = useState("");
+  const [commitMessage, setCommitMessage] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
 
@@ -75,12 +78,23 @@ export function ProjectEditorPage() {
     enabled: debouncedSearchQuery.trim().length >= 2
   });
 
+  const gitStatusQuery = useQuery({
+    queryKey: ["project-git-status", projectId],
+    queryFn: () => api.gitStatus(projectId),
+    enabled: sourceControlOpen,
+    refetchInterval: sourceControlOpen ? 3000 : false
+  });
+
   const project = projectQuery.data ?? null;
   const files = filesQuery.data ?? [];
   const folders = foldersQuery.data ?? [];
   const snapshots = snapshotsQuery.data ?? [];
   const compileJob = compileOverride ?? latestCompileQuery.data ?? null;
   const searchResults = debouncedSearchQuery.trim().length >= 2 ? projectSearchQuery.data ?? [] : [];
+
+  const invalidateGitStatus = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["project-git-status", projectId] });
+  };
 
   useEffect(() => {
     if (project) setProjectName(project.name);
@@ -91,6 +105,7 @@ export function ProjectEditorPage() {
     setCompileOverride(null);
     setSearchQuery("");
     setDebouncedSearchQuery("");
+    setCommitMessage("");
   }, [projectId]);
 
   useEffect(() => {
@@ -126,10 +141,11 @@ export function ProjectEditorPage() {
 
   const saveFileMutation = useMutation({
     mutationFn: ({ fileId, nextContent }: { fileId: string; nextContent: string }) => api.saveFile(projectId, fileId, nextContent),
-    onSuccess: (saved) => {
+    onSuccess: async (saved) => {
       queryClient.setQueryData(["project-file", projectId, saved.id], saved);
       setActiveFile(saved);
       setSaveState("saved");
+      await invalidateGitStatus();
     },
     onError: () => setSaveState("error")
   });
@@ -138,6 +154,7 @@ export function ProjectEditorPage() {
     mutationFn: (path: string) => api.createFile(projectId, path),
     onSuccess: async (file) => {
       await queryClient.invalidateQueries({ queryKey: ["project-files", projectId] });
+      await invalidateGitStatus();
       await openFile(file);
     }
   });
@@ -146,6 +163,7 @@ export function ProjectEditorPage() {
     mutationFn: ({ fileId, path }: { fileId: string; path: string }) => api.renameFile(projectId, fileId, path),
     onSuccess: async (file) => {
       await queryClient.invalidateQueries({ queryKey: ["project-files", projectId] });
+      await invalidateGitStatus();
       queryClient.setQueryData(["project-file", projectId, file.id], undefined);
       if (activeFile?.id === file.id) {
         const nextFile = await api.getFile(projectId, file.id);
@@ -160,6 +178,7 @@ export function ProjectEditorPage() {
     mutationFn: (fileId: string) => api.deleteFile(projectId, fileId),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["project-files", projectId] });
+      await invalidateGitStatus();
     }
   });
 
@@ -167,6 +186,7 @@ export function ProjectEditorPage() {
     mutationFn: (path: string) => api.createFolder(projectId, path),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] });
+      await invalidateGitStatus();
     }
   });
 
@@ -175,7 +195,8 @@ export function ProjectEditorPage() {
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
-        queryClient.invalidateQueries({ queryKey: ["project-files", projectId] })
+        queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
+        invalidateGitStatus()
       ]);
       setActiveFile(null);
       setContent("");
@@ -187,7 +208,8 @@ export function ProjectEditorPage() {
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
-        queryClient.invalidateQueries({ queryKey: ["project-files", projectId] })
+        queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
+        invalidateGitStatus()
       ]);
     }
   });
@@ -197,7 +219,8 @@ export function ProjectEditorPage() {
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
-        queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] })
+        queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
+        invalidateGitStatus()
       ]);
     }
   });
@@ -219,8 +242,24 @@ export function ProjectEditorPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
-        queryClient.invalidateQueries({ queryKey: ["project-snapshots", projectId] })
+        queryClient.invalidateQueries({ queryKey: ["project-snapshots", projectId] }),
+        invalidateGitStatus()
       ]);
+    }
+  });
+
+  const initGitMutation = useMutation({
+    mutationFn: () => api.initGit(projectId),
+    onSuccess: (status) => {
+      queryClient.setQueryData(["project-git-status", projectId], status);
+    }
+  });
+
+  const commitGitMutation = useMutation({
+    mutationFn: (message: string) => api.commitGit(projectId, message),
+    onSuccess: (status) => {
+      setCommitMessage("");
+      queryClient.setQueryData(["project-git-status", projectId], status);
     }
   });
 
@@ -349,6 +388,15 @@ export function ProjectEditorPage() {
     await restoreSnapshotMutation.mutateAsync(snapshotId);
   };
 
+  const initGit = async () => {
+    await initGitMutation.mutateAsync();
+  };
+
+  const commitGit = async () => {
+    if (!commitMessage.trim()) return;
+    await commitGitMutation.mutateAsync(commitMessage);
+  };
+
   const showPdfSource = async (location: { fileId: string; line: number; column: number }) => {
     const file = files.find((item) => item.id === location.fileId);
     if (!file) return;
@@ -430,11 +478,18 @@ export function ProjectEditorPage() {
         onProjectNameChange={setProjectName}
         onRenameStart={() => setRenaming(true)}
         onRenameSubmit={() => void renameProject()}
-        onHistoryToggle={() => setHistoryOpen((current) => !current)}
+        onHistoryToggle={() => {
+          setSourceControlOpen(false);
+          setHistoryOpen((current) => !current);
+        }}
+        onSourceControlToggle={() => {
+          setHistoryOpen(false);
+          setSourceControlOpen((current) => !current);
+        }}
         onLayoutChange={setLayout}
         onCompile={() => void compile()}
       />
-      <div className={cn("grid min-h-0 flex-1 grid-cols-1", historyOpen ? "md:grid-cols-[260px_minmax(0,1fr)_320px]" : "md:grid-cols-[260px_minmax(0,1fr)]")}>
+      <div className={cn("grid min-h-0 flex-1 grid-cols-1", historyOpen || sourceControlOpen ? "md:grid-cols-[260px_minmax(0,1fr)_320px]" : "md:grid-cols-[260px_minmax(0,1fr)]")}>
         <FileSidebar
           files={files}
           folders={folders}
@@ -478,6 +533,20 @@ export function ProjectEditorPage() {
             onCreate={() => void createSnapshot()}
             onRestore={(snapshot) => void restoreSnapshot(snapshot.id)}
             onClose={() => setHistoryOpen(false)}
+          />
+        )}
+        {sourceControlOpen && (
+          <SourceControlPanel
+            status={gitStatusQuery.data ?? null}
+            loading={gitStatusQuery.isPending}
+            initializing={initGitMutation.isPending}
+            committing={commitGitMutation.isPending}
+            commitMessage={commitMessage}
+            onCommitMessageChange={setCommitMessage}
+            onInit={() => void initGit()}
+            onCommit={() => void commitGit()}
+            onRefresh={() => void gitStatusQuery.refetch()}
+            onClose={() => setSourceControlOpen(false)}
           />
         )}
       </div>

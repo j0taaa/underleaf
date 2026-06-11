@@ -1,4 +1,4 @@
-import { ChevronLeft, Download, History, LayoutPanelLeft, Maximize2, PanelRightOpen, Pencil, Play } from "lucide-react";
+import { ChevronLeft, Download, GitBranch, History, LayoutPanelLeft, Maximize2, PanelRightOpen, Pencil, Play } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { api, type CompileJob, type Project, type ProjectFileWithContent } from "../../api";
 import type { LayoutMode } from "../../types/editor";
@@ -19,6 +19,7 @@ export function EditorHeader({
   onRenameStart,
   onRenameSubmit,
   onHistoryToggle,
+  onSourceControlToggle,
   onLayoutChange,
   onCompile
 }: {
@@ -34,6 +35,7 @@ export function EditorHeader({
   onRenameStart: () => void;
   onRenameSubmit: () => void;
   onHistoryToggle: () => void;
+  onSourceControlToggle: () => void;
   onLayoutChange: (layout: LayoutMode) => void;
   onCompile: () => void;
 }) {
@@ -87,6 +89,10 @@ export function EditorHeader({
         <Button variant="outline" size="sm" title="History" onClick={onHistoryToggle}>
           <History className="h-4 w-4" />
           History
+        </Button>
+        <Button variant="outline" size="sm" title="Source control" onClick={onSourceControlToggle}>
+          <GitBranch className="h-4 w-4" />
+          Git
         </Button>
         <div className="hidden items-center rounded-md border border-border p-0.5 md:flex">
           <Button variant={layout === "split" ? "secondary" : "ghost"} size="icon" title="Split view" onClick={() => onLayoutChange("split")}>

@@ -34,6 +34,14 @@ export type ProjectSearchResult = {
   preview: string;
 };
 
+export type GitStatus = {
+  initialized: boolean;
+  branch: string | null;
+  lastCommit: { hash: string; subject: string; committedAt: string } | null;
+  hasChanges: boolean;
+  entries: Array<{ path: string; status: string }>;
+};
+
 export type CompileJob = {
   id: string;
   projectId: string;
@@ -146,6 +154,18 @@ export const api = {
   },
   searchProject(projectId: string, query: string) {
     return request<ProjectSearchResult[]>(`/api/projects/${projectId}/search?q=${encodeURIComponent(query)}`);
+  },
+  gitStatus(projectId: string) {
+    return request<GitStatus>(`/api/projects/${projectId}/git/status`);
+  },
+  initGit(projectId: string) {
+    return request<GitStatus>(`/api/projects/${projectId}/git/init`, { method: "POST" });
+  },
+  commitGit(projectId: string, message: string) {
+    return request<GitStatus>(`/api/projects/${projectId}/git/commit`, {
+      method: "POST",
+      body: JSON.stringify({ message })
+    });
   },
   listSnapshots(projectId: string) {
     return request<ProjectSnapshot[]>(`/api/projects/${projectId}/snapshots`);
