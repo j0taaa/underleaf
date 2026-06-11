@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { api, type CompileDiagnostic, type CompileJob, type ProjectFile, type ProjectFileWithContent, type ProjectFolder, type ProjectSearchResult } from "../api";
+import { api, type CompileDiagnostic, type CompileJob, type ProjectFile, type ProjectFileWithContent, type ProjectFolder, type ProjectOutlineItem, type ProjectSearchResult } from "../api";
 import { EditorHeader } from "../components/editor/EditorHeader";
 import { EditorLayout } from "../components/editor/EditorLayout";
 import { FileSidebar } from "../components/editor/FileSidebar";
@@ -78,6 +78,11 @@ export function ProjectEditorPage() {
     enabled: debouncedSearchQuery.trim().length >= 2
   });
 
+  const projectOutlineQuery = useQuery({
+    queryKey: ["project-outline", projectId],
+    queryFn: () => api.outlineProject(projectId)
+  });
+
   const gitStatusQuery = useQuery({
     queryKey: ["project-git-status", projectId],
     queryFn: () => api.gitStatus(projectId),
@@ -91,9 +96,14 @@ export function ProjectEditorPage() {
   const snapshots = snapshotsQuery.data ?? [];
   const compileJob = compileOverride ?? latestCompileQuery.data ?? null;
   const searchResults = debouncedSearchQuery.trim().length >= 2 ? projectSearchQuery.data ?? [] : [];
+  const outlineItems = projectOutlineQuery.data ?? [];
 
   const invalidateGitStatus = async () => {
     await queryClient.invalidateQueries({ queryKey: ["project-git-status", projectId] });
+  };
+
+  const invalidateOutline = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["project-outline", projectId] });
   };
 
   useEffect(() => {
@@ -145,7 +155,7 @@ export function ProjectEditorPage() {
       queryClient.setQueryData(["project-file", projectId, saved.id], saved);
       setActiveFile(saved);
       setSaveState("saved");
-      await invalidateGitStatus();
+      await Promise.all([invalidateGitStatus(), invalidateOutline()]);
     },
     onError: () => setSaveState("error")
   });
@@ -153,8 +163,11 @@ export function ProjectEditorPage() {
   const createFileMutation = useMutation({
     mutationFn: (path: string) => api.createFile(projectId, path),
     onSuccess: async (file) => {
-      await queryClient.invalidateQueries({ queryKey: ["project-files", projectId] });
-      await invalidateGitStatus();
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
+        invalidateGitStatus(),
+        invalidateOutline()
+      ]);
       await openFile(file);
     }
   });
@@ -162,8 +175,11 @@ export function ProjectEditorPage() {
   const renameFileMutation = useMutation({
     mutationFn: ({ fileId, path }: { fileId: string; path: string }) => api.renameFile(projectId, fileId, path),
     onSuccess: async (file) => {
-      await queryClient.invalidateQueries({ queryKey: ["project-files", projectId] });
-      await invalidateGitStatus();
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
+        invalidateGitStatus(),
+        invalidateOutline()
+      ]);
       queryClient.setQueryData(["project-file", projectId, file.id], undefined);
       if (activeFile?.id === file.id) {
         const nextFile = await api.getFile(projectId, file.id);
@@ -177,16 +193,22 @@ export function ProjectEditorPage() {
   const deleteFileMutation = useMutation({
     mutationFn: (fileId: string) => api.deleteFile(projectId, fileId),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["project-files", projectId] });
-      await invalidateGitStatus();
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
+        invalidateGitStatus(),
+        invalidateOutline()
+      ]);
     }
   });
 
   const createFolderMutation = useMutation({
     mutationFn: (path: string) => api.createFolder(projectId, path),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] });
-      await invalidateGitStatus();
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
+        invalidateGitStatus(),
+        invalidateOutline()
+      ]);
     }
   });
 
@@ -196,7 +218,8 @@ export function ProjectEditorPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
-        invalidateGitStatus()
+        invalidateGitStatus(),
+        invalidateOutline()
       ]);
       setActiveFile(null);
       setContent("");
@@ -209,7 +232,8 @@ export function ProjectEditorPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
-        invalidateGitStatus()
+        invalidateGitStatus(),
+        invalidateOutline()
       ]);
     }
   });
@@ -220,7 +244,8 @@ export function ProjectEditorPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
-        invalidateGitStatus()
+        invalidateGitStatus(),
+        invalidateOutline()
       ]);
     }
   });
@@ -243,7 +268,8 @@ export function ProjectEditorPage() {
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
         queryClient.invalidateQueries({ queryKey: ["project-snapshots", projectId] }),
-        invalidateGitStatus()
+        invalidateGitStatus(),
+        invalidateOutline()
       ]);
     }
   });
@@ -433,6 +459,20 @@ export function ProjectEditorPage() {
     if (layout === "pdf") setLayout("split");
   };
 
+  const showOutlineItem = async (item: ProjectOutlineItem) => {
+    const file = files.find((candidate) => candidate.id === item.fileId);
+    if (!file) return;
+
+    await openFile(file);
+    setSourceTarget({
+      fileId: file.id,
+      line: item.line,
+      column: item.column,
+      nonce: Date.now()
+    });
+    if (layout === "pdf") setLayout("split");
+  };
+
   const statusText = useMemo(() => {
     if (compileMutation.isPending) return "Compiling";
     if (compileJob?.status === "success") return `Compiled in ${compileJob.durationMs ?? 0} ms`;
@@ -505,8 +545,11 @@ export function ProjectEditorPage() {
           searchQuery={searchQuery}
           searchResults={searchResults}
           searching={projectSearchQuery.isFetching}
+          outlineItems={outlineItems}
+          outlineLoading={projectOutlineQuery.isFetching}
           onSearchQueryChange={setSearchQuery}
           onOpenSearchResult={(result) => void showSearchResult(result)}
+          onOpenOutlineItem={(item) => void showOutlineItem(item)}
         />
         <EditorLayout
           layout={layout}

@@ -14,10 +14,11 @@ import {
 } from "lucide-react";
 import type React from "react";
 import { useMemo, useState } from "react";
-import type { ProjectFile, ProjectFileWithContent, ProjectFolder, ProjectSearchResult } from "../../api";
+import type { ProjectFile, ProjectFileWithContent, ProjectFolder, ProjectOutlineItem, ProjectSearchResult } from "../../api";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { DocumentOutlinePanel } from "./DocumentOutlinePanel";
 import { ProjectSearchPanel } from "./ProjectSearchPanel";
 
 type ExplorerNode =
@@ -42,8 +43,11 @@ export function FileSidebar({
   searchQuery,
   searchResults,
   searching,
+  outlineItems,
+  outlineLoading,
   onSearchQueryChange,
-  onOpenSearchResult
+  onOpenSearchResult,
+  onOpenOutlineItem
 }: {
   files: ProjectFile[];
   folders: ProjectFolder[];
@@ -59,8 +63,11 @@ export function FileSidebar({
   searchQuery: string;
   searchResults: ProjectSearchResult[];
   searching: boolean;
+  outlineItems: ProjectOutlineItem[];
+  outlineLoading: boolean;
   onSearchQueryChange: (query: string) => void;
   onOpenSearchResult: (result: ProjectSearchResult) => void;
+  onOpenOutlineItem: (item: ProjectOutlineItem) => void;
 }) {
   const tree = useMemo(() => buildTree(files, folders), [files, folders]);
   const folderByPath = useMemo(() => new Map(folders.map((folder) => [folder.path, folder])), [folders]);
@@ -160,6 +167,8 @@ export function FileSidebar({
         onQueryChange={onSearchQueryChange}
         onOpenResult={onOpenSearchResult}
       />
+
+      <DocumentOutlinePanel items={outlineItems} loading={outlineLoading} onOpenItem={onOpenOutlineItem} />
 
       <div className="min-h-0 flex-1 overflow-auto py-1 text-sm">
         {draft?.parentPath === "" && (

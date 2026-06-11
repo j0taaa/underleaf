@@ -240,6 +240,50 @@ describe("projects and files", () => {
     ]);
   });
 
+  it("builds a clickable LaTeX document outline across source files", async () => {
+    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Outlined" } });
+    const project = projectResponse.json<{ id: string }>();
+    const files = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
+    const mainFile = files.find((file) => file.path === "main.tex");
+    expect(mainFile).toBeDefined();
+
+    await app.inject({
+      method: "PUT",
+      url: `/api/projects/${project.id}/files/${mainFile?.id}/content`,
+      payload: {
+        content: [
+          "\\documentclass{report}",
+          "\\begin{document}",
+          "\\chapter{Project Overview}",
+          "\\section*{Motivation}",
+          "\\subsection[Short]{Detailed \\textbf{Method}} % outline item",
+          "\\section{Ignored Comment} % not ignored because before comment",
+          "% \\section{Hidden}",
+          "\\input{chapters/background}",
+          "\\end{document}"
+        ].join("\n")
+      }
+    });
+    const chapterResponse = await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/files`,
+      payload: { path: "chapters/background.tex", content: "\\section{Background}\n\\subsection{Prior Work}" }
+    });
+    expect(chapterResponse.statusCode).toBe(201);
+
+    const response = await app.inject({ method: "GET", url: `/api/projects/${project.id}/outline` });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<Array<{ path: string; line: number; level: number; kind: string; title: string }>>()).toEqual([
+      expect.objectContaining({ path: "main.tex", line: 3, level: 1, kind: "chapter", title: "Project Overview" }),
+      expect.objectContaining({ path: "main.tex", line: 4, level: 2, kind: "section", title: "Motivation" }),
+      expect.objectContaining({ path: "main.tex", line: 5, level: 3, kind: "subsection", title: "Detailed Method" }),
+      expect.objectContaining({ path: "main.tex", line: 6, level: 2, kind: "section", title: "Ignored Comment" }),
+      expect.objectContaining({ path: "chapters/background.tex", line: 1, level: 2, kind: "section", title: "Background" }),
+      expect.objectContaining({ path: "chapters/background.tex", line: 2, level: 3, kind: "subsection", title: "Prior Work" })
+    ]);
+  });
+
   it("exports and imports project archives", async () => {
     const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Archive Source" } });
     const project = projectResponse.json<{ id: string }>();

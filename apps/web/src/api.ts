@@ -34,6 +34,16 @@ export type ProjectSearchResult = {
   preview: string;
 };
 
+export type ProjectOutlineItem = {
+  fileId: string;
+  path: string;
+  line: number;
+  column: number;
+  level: number;
+  kind: string;
+  title: string;
+};
+
 export type GitStatus = {
   initialized: boolean;
   branch: string | null;
@@ -154,6 +164,9 @@ export const api = {
   },
   searchProject(projectId: string, query: string) {
     return request<ProjectSearchResult[]>(`/api/projects/${projectId}/search?q=${encodeURIComponent(query)}`);
+  },
+  outlineProject(projectId: string) {
+    return request<ProjectOutlineItem[]>(`/api/projects/${projectId}/outline`);
   },
   gitStatus(projectId: string) {
     return request<GitStatus>(`/api/projects/${projectId}/git/status`);

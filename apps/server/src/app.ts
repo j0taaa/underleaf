@@ -28,6 +28,15 @@ type ProjectSearchResult = {
   column: number;
   preview: string;
 };
+type ProjectOutlineItem = {
+  fileId: string;
+  path: string;
+  line: number;
+  column: number;
+  level: number;
+  kind: string;
+  title: string;
+};
 type GitStatusResult = {
   initialized: boolean;
   branch: string | null;
@@ -157,6 +166,11 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
     if (query.length > 120) return reply.code(400).send({ message: "Search query is too long" });
 
     return searchProjectFiles(db, config, request.params.projectId, query);
+  });
+
+  app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/outline", async (request, reply) => {
+    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    return buildProjectOutline(db, config, request.params.projectId);
   });
 
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/git/status", async (request, reply) => {
@@ -1060,6 +1074,116 @@ function normalizeSearchText(value: string): string {
   return value.toLowerCase().replace(/\\[a-z]+\*?/g, " ").replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ");
 }
 
+async function buildProjectOutline(db: UnderleafDb, config: ServerConfig, projectId: string): Promise<ProjectOutlineItem[]> {
+  const root = path.resolve(projectRoot(config.dataDir, projectId));
+  const outline: ProjectOutlineItem[] = [];
+
+  for (const file of db.listFiles(projectId).sort(compareOutlineFiles)) {
+    if (!isLatexSourceFile(file.path)) continue;
+
+    const absoluteFile = path.resolve(root, normalizeProjectPath(file.path));
+    if (!absoluteFile.startsWith(root)) continue;
+
+    const stat = await fs.stat(absoluteFile).catch(() => null);
+    if (!stat?.isFile() || stat.size > 1024 * 1024) continue;
+
+    const content = await fs.readFile(absoluteFile, "utf8").catch(() => "");
+    if (content.includes("\u0000")) continue;
+
+    const lines = content.split(/\r?\n/);
+    for (let index = 0; index < lines.length; index += 1) {
+      const item = parseOutlineLine(lines[index]);
+      if (!item) continue;
+      outline.push({
+        fileId: file.id,
+        path: file.path,
+        line: index + 1,
+        column: item.column,
+        level: item.level,
+        kind: item.kind,
+        title: item.title
+      });
+    }
+  }
+
+  return outline.slice(0, 500);
+}
+
+function parseOutlineLine(line: string): Omit<ProjectOutlineItem, "fileId" | "path" | "line"> | null {
+  const withoutComment = stripLatexLineComment(line);
+  const match = withoutComment.match(/\\(part|chapter|section|subsection|subsubsection|paragraph|subparagraph)\*?\s*(?:\[[^\]]*])?\s*\{/);
+  if (!match || match.index === undefined) return null;
+
+  const titleStart = match.index + match[0].length;
+  const rawTitle = readBalancedLatexArgument(withoutComment, titleStart);
+  const title = cleanOutlineTitle(rawTitle);
+  if (!title) return null;
+
+  const kind = match[1];
+  return {
+    column: match.index + 1,
+    level: outlineLevel(kind),
+    kind,
+    title
+  };
+}
+
+function stripLatexLineComment(line: string): string {
+  for (let index = 0; index < line.length; index += 1) {
+    if (line[index] !== "%") continue;
+    let slashCount = 0;
+    for (let previous = index - 1; previous >= 0 && line[previous] === "\\"; previous -= 1) slashCount += 1;
+    if (slashCount % 2 === 0) return line.slice(0, index);
+  }
+  return line;
+}
+
+function readBalancedLatexArgument(value: string, startIndex: number): string {
+  let depth = 1;
+  let result = "";
+
+  for (let index = startIndex; index < value.length; index += 1) {
+    const char = value[index];
+    const previous = value[index - 1];
+    if (char === "{" && previous !== "\\") depth += 1;
+    if (char === "}" && previous !== "\\") depth -= 1;
+    if (depth === 0) return result;
+    result += char;
+  }
+
+  return result;
+}
+
+function cleanOutlineTitle(value: string): string {
+  return value
+    .replace(/\\texorpdfstring\s*\{([^{}]*)}\s*\{([^{}]*)}/g, "$1")
+    .replace(/\\[A-Za-z]+\*?(?:\[[^\]]*])?\{([^{}]*)}/g, "$1")
+    .replace(/\\[A-Za-z]+\*?/g, "")
+    .replace(/[{}$]/g, "")
+    .replace(/~+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function outlineLevel(kind: string): number {
+  const levels: Record<string, number> = {
+    part: 0,
+    chapter: 1,
+    section: 2,
+    subsection: 3,
+    subsubsection: 4,
+    paragraph: 5,
+    subparagraph: 6
+  };
+  return levels[kind] ?? 9;
+}
+
+function compareOutlineFiles(left: FileRow, right: FileRow): number {
+  if (left.path === "main.tex") return -1;
+  if (right.path === "main.tex") return 1;
+  return left.path.localeCompare(right.path);
+}
+
 async function getProjectGitStatus(config: ServerConfig, projectId: string): Promise<GitStatusResult> {
   const root = projectRoot(config.dataDir, projectId);
   if (!(await isGitRepository(root))) {
@@ -1216,6 +1340,10 @@ function isSearchableFile(filePath: string): boolean {
   const extension = path.posix.extname(filePath).toLowerCase();
   if (!extension) return true;
   return new Set([".bib", ".cls", ".csv", ".md", ".sty", ".tex", ".txt"]).has(extension);
+}
+
+function isLatexSourceFile(filePath: string): boolean {
+  return new Set([".cls", ".sty", ".tex"]).has(path.posix.extname(filePath).toLowerCase());
 }
 
 function spawnCommand(bin: string, args: string[], cwd: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
