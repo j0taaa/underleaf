@@ -50,6 +50,11 @@ export type ProjectWordCount = {
   files: Array<{ fileId: string; path: string; words: number; characters: number }>;
 };
 
+export type ProjectSymbols = {
+  labels: Array<{ key: string; fileId: string; path: string; line: number }>;
+  citations: Array<{ key: string; fileId: string; path: string; line: number }>;
+};
+
 export type GitStatus = {
   initialized: boolean;
   branch: string | null;
@@ -176,6 +181,9 @@ export const api = {
   },
   wordCount(projectId: string) {
     return request<ProjectWordCount>(`/api/projects/${projectId}/word-count`);
+  },
+  symbols(projectId: string) {
+    return request<ProjectSymbols>(`/api/projects/${projectId}/symbols`);
   },
   gitStatus(projectId: string) {
     return request<GitStatus>(`/api/projects/${projectId}/git/status`);

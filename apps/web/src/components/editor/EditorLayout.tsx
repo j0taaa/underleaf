@@ -1,4 +1,4 @@
-import type { CompileDiagnostic, CompileJob, ProjectFileWithContent } from "../../api";
+import type { CompileDiagnostic, CompileJob, ProjectFileWithContent, ProjectSymbols } from "../../api";
 import type { LayoutMode, SaveState } from "../../types/editor";
 import { cn } from "../../lib/utils";
 import { PdfPreviewPane } from "./PdfPreviewPane";
@@ -13,6 +13,7 @@ export function EditorLayout({
   compileJob,
   pdfNonce,
   sourceTarget,
+  symbols,
   onContentChange,
   onPdfReload,
   onPdfSourceLocated,
@@ -26,6 +27,7 @@ export function EditorLayout({
   compileJob: CompileJob | null;
   pdfNonce: number;
   sourceTarget: { line: number; column: number; nonce: number } | null;
+  symbols: ProjectSymbols | null;
   onContentChange: (content: string) => void;
   onPdfReload: () => void;
   onPdfSourceLocated: (location: { fileId: string; line: number; column: number }) => void;
@@ -40,7 +42,7 @@ export function EditorLayout({
         layout === "pdf" && "grid-cols-1"
       )}
     >
-      {layout !== "pdf" && <SourceEditorPane activeFile={activeFile} content={content} saveState={saveState} sourceTarget={sourceTarget} onContentChange={onContentChange} />}
+      {layout !== "pdf" && <SourceEditorPane activeFile={activeFile} content={content} saveState={saveState} sourceTarget={sourceTarget} symbols={symbols} onContentChange={onContentChange} />}
       {layout !== "editor" && (
         <PdfPreviewPane
           projectId={projectId}

@@ -98,6 +98,11 @@ export function ProjectEditorPage() {
     enabled: wordCountOpen
   });
 
+  const projectSymbolsQuery = useQuery({
+    queryKey: ["project-symbols", projectId],
+    queryFn: () => api.symbols(projectId)
+  });
+
   const project = projectQuery.data ?? null;
   const files = filesQuery.data ?? [];
   const folders = foldersQuery.data ?? [];
@@ -105,6 +110,7 @@ export function ProjectEditorPage() {
   const compileJob = compileOverride ?? latestCompileQuery.data ?? null;
   const searchResults = debouncedSearchQuery.trim().length >= 2 ? projectSearchQuery.data ?? [] : [];
   const outlineItems = projectOutlineQuery.data ?? [];
+  const projectSymbols = projectSymbolsQuery.data ?? null;
 
   const invalidateGitStatus = async () => {
     await queryClient.invalidateQueries({ queryKey: ["project-git-status", projectId] });
@@ -116,6 +122,10 @@ export function ProjectEditorPage() {
 
   const invalidateWordCount = async () => {
     await queryClient.invalidateQueries({ queryKey: ["project-word-count", projectId] });
+  };
+
+  const invalidateSymbols = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["project-symbols", projectId] });
   };
 
   useEffect(() => {
@@ -167,7 +177,7 @@ export function ProjectEditorPage() {
       queryClient.setQueryData(["project-file", projectId, saved.id], saved);
       setActiveFile(saved);
       setSaveState("saved");
-      await Promise.all([invalidateGitStatus(), invalidateOutline(), invalidateWordCount()]);
+      await Promise.all([invalidateGitStatus(), invalidateOutline(), invalidateWordCount(), invalidateSymbols()]);
     },
     onError: () => setSaveState("error")
   });
@@ -179,7 +189,8 @@ export function ProjectEditorPage() {
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
         invalidateGitStatus(),
         invalidateOutline(),
-        invalidateWordCount()
+        invalidateWordCount(),
+        invalidateSymbols()
       ]);
       await openFile(file);
     }
@@ -192,7 +203,8 @@ export function ProjectEditorPage() {
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
         invalidateGitStatus(),
         invalidateOutline(),
-        invalidateWordCount()
+        invalidateWordCount(),
+        invalidateSymbols()
       ]);
       queryClient.setQueryData(["project-file", projectId, file.id], undefined);
       if (activeFile?.id === file.id) {
@@ -211,7 +223,8 @@ export function ProjectEditorPage() {
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
         invalidateGitStatus(),
         invalidateOutline(),
-        invalidateWordCount()
+        invalidateWordCount(),
+        invalidateSymbols()
       ]);
     }
   });
@@ -223,7 +236,8 @@ export function ProjectEditorPage() {
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
         invalidateGitStatus(),
         invalidateOutline(),
-        invalidateWordCount()
+        invalidateWordCount(),
+        invalidateSymbols()
       ]);
     }
   });
@@ -236,7 +250,8 @@ export function ProjectEditorPage() {
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
         invalidateGitStatus(),
         invalidateOutline(),
-        invalidateWordCount()
+        invalidateWordCount(),
+        invalidateSymbols()
       ]);
       setActiveFile(null);
       setContent("");
@@ -251,7 +266,8 @@ export function ProjectEditorPage() {
         queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
         invalidateGitStatus(),
         invalidateOutline(),
-        invalidateWordCount()
+        invalidateWordCount(),
+        invalidateSymbols()
       ]);
     }
   });
@@ -264,7 +280,8 @@ export function ProjectEditorPage() {
         queryClient.invalidateQueries({ queryKey: ["project-folders", projectId] }),
         invalidateGitStatus(),
         invalidateOutline(),
-        invalidateWordCount()
+        invalidateWordCount(),
+        invalidateSymbols()
       ]);
     }
   });
@@ -289,7 +306,8 @@ export function ProjectEditorPage() {
         queryClient.invalidateQueries({ queryKey: ["project-snapshots", projectId] }),
         invalidateGitStatus(),
         invalidateOutline(),
-        invalidateWordCount()
+        invalidateWordCount(),
+        invalidateSymbols()
       ]);
     }
   });
@@ -587,6 +605,7 @@ export function ProjectEditorPage() {
           compileJob={compileJob}
           pdfNonce={pdfNonce}
           sourceTarget={sourceTarget}
+          symbols={projectSymbols}
           onContentChange={setContent}
           onPdfReload={() => setPdfNonce(Date.now())}
           onPdfSourceLocated={(location) => void showPdfSource(location)}

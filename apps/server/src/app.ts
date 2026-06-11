@@ -42,6 +42,10 @@ type ProjectWordCount = {
   characters: number;
   files: Array<{ fileId: string; path: string; words: number; characters: number }>;
 };
+type ProjectSymbols = {
+  labels: Array<{ key: string; fileId: string; path: string; line: number }>;
+  citations: Array<{ key: string; fileId: string; path: string; line: number }>;
+};
 type GitStatusResult = {
   initialized: boolean;
   branch: string | null;
@@ -181,6 +185,11 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/word-count", async (request, reply) => {
     if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
     return countProjectWords(db, config, request.params.projectId);
+  });
+
+  app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/symbols", async (request, reply) => {
+    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    return collectProjectSymbols(db, config, request.params.projectId);
   });
 
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/git/status", async (request, reply) => {
@@ -1254,6 +1263,62 @@ function countWords(text: string): number {
 
 function countCharacters(text: string): number {
   return text.replace(/\s+/g, "").length;
+}
+
+async function collectProjectSymbols(db: UnderleafDb, config: ServerConfig, projectId: string): Promise<ProjectSymbols> {
+  const root = path.resolve(projectRoot(config.dataDir, projectId));
+  const labels = new Map<string, { key: string; fileId: string; path: string; line: number }>();
+  const citations = new Map<string, { key: string; fileId: string; path: string; line: number }>();
+
+  for (const file of db.listFiles(projectId).sort(compareOutlineFiles)) {
+    const extension = path.posix.extname(file.path).toLowerCase();
+    if (!isLatexSourceFile(file.path) && extension !== ".bib") continue;
+
+    const absoluteFile = path.resolve(root, normalizeProjectPath(file.path));
+    if (!absoluteFile.startsWith(root)) continue;
+
+    const stat = await fs.stat(absoluteFile).catch(() => null);
+    if (!stat?.isFile() || stat.size > 1024 * 1024) continue;
+
+    const content = await fs.readFile(absoluteFile, "utf8").catch(() => "");
+    if (content.includes("\u0000")) continue;
+
+    const lines = content.split(/\r?\n/);
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = stripLatexLineComment(lines[index]);
+      if (extension === ".bib") {
+        for (const key of extractBibKeys(line)) {
+          if (!citations.has(key)) citations.set(key, { key, fileId: file.id, path: file.path, line: index + 1 });
+        }
+        continue;
+      }
+
+      for (const key of extractLatexLabels(line)) {
+        if (!labels.has(key)) labels.set(key, { key, fileId: file.id, path: file.path, line: index + 1 });
+      }
+      for (const key of extractBibItems(line)) {
+        if (!citations.has(key)) citations.set(key, { key, fileId: file.id, path: file.path, line: index + 1 });
+      }
+    }
+  }
+
+  return {
+    labels: [...labels.values()].slice(0, 500),
+    citations: [...citations.values()].slice(0, 500)
+  };
+}
+
+function extractLatexLabels(line: string): string[] {
+  return [...line.matchAll(/\\label\s*\{([^{}]+)}/g)].map((match) => match[1].trim()).filter(Boolean);
+}
+
+function extractBibItems(line: string): string[] {
+  return [...line.matchAll(/\\bibitem(?:\[[^\]]*])?\s*\{([^{}]+)}/g)].map((match) => match[1].trim()).filter(Boolean);
+}
+
+function extractBibKeys(line: string): string[] {
+  const match = line.match(/@\w+\s*\{\s*([^,\s]+)\s*,/);
+  return match?.[1] ? [match[1].trim()] : [];
 }
 
 async function getProjectGitStatus(config: ServerConfig, projectId: string): Promise<GitStatusResult> {
