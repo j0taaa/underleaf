@@ -281,6 +281,20 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
     return { ...file, content };
   });
 
+  app.get<{ Params: { projectId: string; fileId: string } }>("/api/projects/:projectId/files/:fileId/raw", async (request, reply) => {
+    const file = db.getFile(request.params.projectId, request.params.fileId);
+    if (!file) return reply.code(404).send({ message: "File not found" });
+
+    const root = path.resolve(projectRoot(config.dataDir, file.projectId));
+    const absoluteFile = path.resolve(projectFilePath(config.dataDir, file.projectId, file.path));
+    if (!absoluteFile.startsWith(root)) return reply.code(403).send({ message: "File path is outside project" });
+
+    return reply
+      .type(mimeTypeForPath(file.path))
+      .header("Content-Disposition", `inline; filename="${path.posix.basename(file.path).replaceAll('"', "")}"`)
+      .send(await fs.readFile(absoluteFile));
+  });
+
   app.put<{ Params: { projectId: string; fileId: string }; Body: UpdateFileBody }>("/api/projects/:projectId/files/:fileId/content", async (request, reply) => {
     const file = db.getFile(request.params.projectId, request.params.fileId);
     if (!file) return reply.code(404).send({ message: "File not found" });
@@ -1093,6 +1107,30 @@ async function removeEmptyProjectDirs(dir: string, preserveNames: Set<string>): 
 
 function sanitizeDownloadName(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "snapshot";
+}
+
+function mimeTypeForPath(filePath: string): string {
+  const extension = path.posix.extname(filePath).toLowerCase();
+  const types: Record<string, string> = {
+    ".bib": "text/plain; charset=utf-8",
+    ".cls": "text/plain; charset=utf-8",
+    ".csv": "text/csv; charset=utf-8",
+    ".gif": "image/gif",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".json": "application/json; charset=utf-8",
+    ".log": "text/plain; charset=utf-8",
+    ".md": "text/markdown; charset=utf-8",
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".sty": "text/plain; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".tex": "text/plain; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
+    ".webp": "image/webp",
+    ".xml": "application/xml; charset=utf-8"
+  };
+  return types[extension] ?? "application/octet-stream";
 }
 
 async function locateSourceWithSynctex(

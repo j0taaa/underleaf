@@ -315,6 +315,12 @@ describe("projects and files", () => {
     ]);
     await expect(fs.readFile(path.join(tmpDir, "projects", project.id, "figures", "logo.png"), "utf8")).resolves.toBe("PNGDATA");
     await expect(fs.readFile(path.join(tmpDir, "projects", project.id, "figures", "logo-1.png"), "utf8")).resolves.toBe("PNGDATA2");
+
+    const uploadedFile = uploadResponse.json<Array<{ id: string; path: string }>>()[0];
+    const rawResponse = await app.inject({ method: "GET", url: `/api/projects/${project.id}/files/${uploadedFile.id}/raw` });
+    expect(rawResponse.statusCode).toBe(200);
+    expect(rawResponse.headers["content-type"]).toContain("image/png");
+    expect(rawResponse.rawPayload.toString("utf8")).toBe("PNGDATA");
   });
 
   it("searches project text files and reports source locations", async () => {

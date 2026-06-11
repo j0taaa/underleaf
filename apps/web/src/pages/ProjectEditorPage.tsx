@@ -8,6 +8,7 @@ import { FileSidebar } from "../components/editor/FileSidebar";
 import { HistoryPanel } from "../components/editor/HistoryPanel";
 import { SourceControlPanel } from "../components/editor/SourceControlPanel";
 import { WordCountPanel } from "../components/editor/WordCountPanel";
+import { isEditableTextFile } from "../lib/fileTypes";
 import { cn } from "../lib/utils";
 import type { LayoutMode, SaveState } from "../types/editor";
 
@@ -199,7 +200,7 @@ export function ProjectEditorPage() {
   });
 
   const saveCurrentFile = async () => {
-    if (!activeFile || activeFile.projectId !== projectId || content === activeFile.content) return activeFile;
+    if (!activeFile || activeFile.projectId !== projectId || !isEditableTextFile(activeFile.path) || content === activeFile.content) return activeFile;
 
     setSaveState("saving");
     return saveFileMutation.mutateAsync({ fileId: activeFile.id, nextContent: content });
@@ -395,7 +396,7 @@ export function ProjectEditorPage() {
   });
 
   useEffect(() => {
-    if (!projectId || !activeFile || activeFile.projectId !== projectId || content === activeFile.content) return;
+    if (!projectId || !activeFile || activeFile.projectId !== projectId || !isEditableTextFile(activeFile.path) || content === activeFile.content) return;
     setSaveState("saving");
     const timer = window.setTimeout(() => {
       saveFileMutation.mutate({ fileId: activeFile.id, nextContent: content });
@@ -423,6 +424,15 @@ export function ProjectEditorPage() {
   const openFile = async (file: ProjectFile, options: { saveCurrent?: boolean } = {}) => {
     if (options.saveCurrent !== false && activeFile?.id !== file.id) {
       await saveCurrentFile();
+    }
+
+    if (!isEditableTextFile(file.path)) {
+      const assetFile = { ...file, content: "" };
+      setActiveFile(assetFile);
+      setOpenFileIds((current) => current.includes(assetFile.id) ? current : [...current, assetFile.id]);
+      setContent("");
+      setSaveState("idle");
+      return assetFile;
     }
 
     const nextFile = await queryClient.fetchQuery({

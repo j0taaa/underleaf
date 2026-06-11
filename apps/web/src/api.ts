@@ -132,6 +132,9 @@ export const api = {
   pdfUrl(projectId: string, nonce: number) {
     return `${API_BASE}/api/projects/${projectId}/pdf?t=${nonce}`;
   },
+  fileRawUrl(projectId: string, fileId: string) {
+    return `${API_BASE}/api/projects/${projectId}/files/${fileId}/raw`;
+  },
   snapshotDownloadUrl(projectId: string, snapshotId: string) {
     return `${API_BASE}/api/projects/${projectId}/snapshots/${snapshotId}/download`;
   },

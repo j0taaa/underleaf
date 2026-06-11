@@ -4,8 +4,10 @@ import { Save } from "lucide-react";
 import { useEffect, useRef } from "react";
 import type { ProjectFile, ProjectFileWithContent, ProjectSymbols } from "../../api";
 import type { SaveState } from "../../types/editor";
+import { isEditableTextFile } from "../../lib/fileTypes";
 import { registerLatexLanguage } from "../../lib/monacoLatex";
 import { cn } from "../../lib/utils";
+import { AssetPreviewPane } from "./AssetPreviewPane";
 import { OpenFileTabs } from "./OpenFileTabs";
 
 type MonacoPosition = { lineNumber: number; column: number };
@@ -111,27 +113,31 @@ export function SourceEditorPane({
         </span>
       </div>
       <div className="min-h-0 flex-1">
-        <Editor
-          height="100%"
-          language="latex"
-          theme="underleaf-dark"
-          value={content}
-          beforeMount={registerLatexLanguage}
-          onMount={(editor, monaco) => {
-            editorRef.current = editor;
-            monacoRef.current = monaco;
-            completionProviderRef.current?.dispose();
-            completionProviderRef.current = registerProjectCompletionProvider(monaco, symbols);
-          }}
-          options={{
-            minimap: { enabled: false },
-            fontSize: 14,
-            wordWrap: "on",
-            scrollBeyondLastLine: false,
-            automaticLayout: true
-          }}
-          onChange={(value) => onContentChange(value ?? "")}
-        />
+        {activeFile && !isEditableTextFile(activeFile.path) ? (
+          <AssetPreviewPane projectId={activeFile.projectId} file={activeFile} />
+        ) : (
+          <Editor
+            height="100%"
+            language="latex"
+            theme="underleaf-dark"
+            value={content}
+            beforeMount={registerLatexLanguage}
+            onMount={(editor, monaco) => {
+              editorRef.current = editor;
+              monacoRef.current = monaco;
+              completionProviderRef.current?.dispose();
+              completionProviderRef.current = registerProjectCompletionProvider(monaco, symbols);
+            }}
+            options={{
+              minimap: { enabled: false },
+              fontSize: 14,
+              wordWrap: "on",
+              scrollBeyondLastLine: false,
+              automaticLayout: true
+            }}
+            onChange={(value) => onContentChange(value ?? "")}
+          />
+        )}
       </div>
     </div>
   );
