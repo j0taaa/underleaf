@@ -4,6 +4,7 @@ import { Save } from "lucide-react";
 import { useEffect, useRef } from "react";
 import type { ProjectFile, ProjectFileWithContent, ProjectSymbols } from "../../api";
 import type { SaveState } from "../../types/editor";
+import { buildLatexCompletions, type LatexCompletion } from "../../lib/latexCompletions";
 import { isEditableTextFile } from "../../lib/fileTypes";
 import { registerLatexLanguage } from "../../lib/monacoLatex";
 import { cn } from "../../lib/utils";
@@ -52,13 +53,13 @@ export function SourceEditorPane({
     if (!monaco) return;
 
     completionProviderRef.current?.dispose();
-    completionProviderRef.current = registerProjectCompletionProvider(monaco, symbols);
+    completionProviderRef.current = registerProjectCompletionProvider(monaco, files, symbols);
 
     return () => {
       completionProviderRef.current?.dispose();
       completionProviderRef.current = null;
     };
-  }, [symbols]);
+  }, [files, symbols]);
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -126,7 +127,7 @@ export function SourceEditorPane({
               editorRef.current = editor;
               monacoRef.current = monaco;
               completionProviderRef.current?.dispose();
-              completionProviderRef.current = registerProjectCompletionProvider(monaco, symbols);
+              completionProviderRef.current = registerProjectCompletionProvider(monaco, files, symbols);
             }}
             options={{
               minimap: { enabled: false },
@@ -143,7 +144,7 @@ export function SourceEditorPane({
   );
 }
 
-function registerProjectCompletionProvider(monaco: Monaco, symbols: ProjectSymbols | null) {
+function registerProjectCompletionProvider(monaco: Monaco, files: ProjectFile[], symbols: ProjectSymbols | null) {
   return monaco.languages.registerCompletionItemProvider("latex", {
     triggerCharacters: ["\\", "{", ","],
     provideCompletionItems(model: CompletionModel, position: MonacoPosition) {
@@ -161,77 +162,27 @@ function registerProjectCompletionProvider(monaco: Monaco, symbols: ProjectSymbo
         endColumn: position.column
       });
 
-      const suggestions = [
-        ...latexCommandSuggestions(monaco, range, linePrefix),
-        ...symbolSuggestions(monaco, range, linePrefix, symbols)
-      ];
+      const suggestions = buildLatexCompletions({ linePrefix, files, symbols }).map((completion) => toMonacoCompletion(monaco, range, completion));
 
       return { suggestions };
     }
   });
 }
 
-function latexCommandSuggestions(monaco: Monaco, range: MonacoRange, linePrefix: string) {
-  if (!/\\[A-Za-z]*$/.test(linePrefix)) return [];
-
-  return LATEX_COMMANDS.map((command) => ({
-    label: command.label,
-    kind: monaco.languages.CompletionItemKind.Snippet,
-    insertText: command.insertText,
-    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-    detail: command.detail,
-    documentation: command.documentation,
+function toMonacoCompletion(monaco: Monaco, range: MonacoRange, completion: LatexCompletion) {
+  return {
+    label: completion.label,
+    kind: completionKind(monaco, completion.kind),
+    insertText: completion.insertText,
+    insertTextRules: completion.insertAsSnippet ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined,
+    detail: completion.detail,
+    documentation: completion.documentation,
     range
-  }));
+  };
 }
 
-function symbolSuggestions(monaco: Monaco, range: MonacoRange, linePrefix: string, symbols: ProjectSymbols | null) {
-  if (isReferenceContext(linePrefix)) {
-    return (symbols?.labels ?? []).map((label) => ({
-      label: label.key,
-      kind: monaco.languages.CompletionItemKind.Reference,
-      insertText: label.key,
-      detail: label.path,
-      documentation: `Line ${label.line}`,
-      range
-    }));
-  }
-
-  if (isCitationContext(linePrefix)) {
-    return (symbols?.citations ?? []).map((citation) => ({
-      label: citation.key,
-      kind: monaco.languages.CompletionItemKind.Reference,
-      insertText: citation.key,
-      detail: citation.path,
-      documentation: `Line ${citation.line}`,
-      range
-    }));
-  }
-
-  return [];
+function completionKind(monaco: Monaco, kind: LatexCompletion["kind"]) {
+  if (kind === "snippet") return monaco.languages.CompletionItemKind.Snippet;
+  if (kind === "file") return monaco.languages.CompletionItemKind.File;
+  return monaco.languages.CompletionItemKind.Reference;
 }
-
-function isReferenceContext(linePrefix: string): boolean {
-  return /\\(?:ref|eqref|pageref|autoref|cref|Cref)\*?(?:\[[^\]]*])?\{[^{}]*$/.test(linePrefix);
-}
-
-function isCitationContext(linePrefix: string): boolean {
-  return /\\cite[A-Za-z*]*(?:\[[^\]]*]){0,2}\{[^{}]*$/.test(linePrefix);
-}
-
-const LATEX_COMMANDS = [
-  { label: "\\section", insertText: "\\section{${1:title}}", detail: "Section", documentation: "Insert a section heading." },
-  { label: "\\subsection", insertText: "\\subsection{${1:title}}", detail: "Subsection", documentation: "Insert a subsection heading." },
-  { label: "\\subsubsection", insertText: "\\subsubsection{${1:title}}", detail: "Subsubsection", documentation: "Insert a subsubsection heading." },
-  { label: "\\paragraph", insertText: "\\paragraph{${1:title}}", detail: "Paragraph", documentation: "Insert a paragraph heading." },
-  { label: "\\label", insertText: "\\label{${1:key}}", detail: "Label", documentation: "Define a cross-reference label." },
-  { label: "\\ref", insertText: "\\ref{${1:key}}", detail: "Reference", documentation: "Reference a label." },
-  { label: "\\eqref", insertText: "\\eqref{${1:key}}", detail: "Equation reference", documentation: "Reference an equation label." },
-  { label: "\\cite", insertText: "\\cite{${1:key}}", detail: "Citation", documentation: "Insert a citation." },
-  { label: "\\begin", insertText: "\\begin{${1:environment}}\n\t${0}\n\\end{$1}", detail: "Environment", documentation: "Insert a LaTeX environment." },
-  { label: "\\item", insertText: "\\item ${1:text}", detail: "List item", documentation: "Insert a list item." },
-  { label: "\\textbf", insertText: "\\textbf{${1:text}}", detail: "Bold text", documentation: "Bold inline text." },
-  { label: "\\emph", insertText: "\\emph{${1:text}}", detail: "Emphasis", documentation: "Emphasize inline text." },
-  { label: "\\includegraphics", insertText: "\\includegraphics[width=${1:0.8}\\textwidth]{${2:path}}", detail: "Graphic", documentation: "Insert an image." },
-  { label: "\\caption", insertText: "\\caption{${1:text}}", detail: "Caption", documentation: "Insert a figure or table caption." }
-];
