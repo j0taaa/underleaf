@@ -1,11 +1,10 @@
-import { ChevronLeft, ChevronRight, Download, Minus, Plus, RefreshCw } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { PDFDocumentProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { api, type CompileDiagnostic, type CompileJob } from "../../api";
-import { Button } from "../ui/button";
 import { CompileDiagnosticsPanel } from "./CompileDiagnosticsPanel";
 import { PdfPageCanvas } from "./PdfPageCanvas";
+import { PdfPreviewToolbar } from "./PdfPreviewToolbar";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/legacy/build/pdf.worker.mjs", import.meta.url).toString();
 
@@ -30,6 +29,7 @@ export function PdfPreviewPane({
   const [sourceStatus, setSourceStatus] = useState<string | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [scale, setScale] = useState(0.75);
+  const pageRefs = useRef(new Map<number, HTMLDivElement | null>());
 
   const pdfUrl = useMemo(() => api.pdfUrl(projectId, pdfNonce), [pdfNonce, projectId]);
 
@@ -68,6 +68,15 @@ export function PdfPreviewPane({
 
   const totalPages = document?.numPages ?? 0;
   const visiblePage = Math.min(pageNumber, Math.max(totalPages, 1));
+  const pageNumbers = useMemo(() => Array.from({ length: totalPages }, (_, index) => index + 1), [totalPages]);
+
+  const goToPage = (nextPageNumber: number) => {
+    const clampedPage = clampPage(nextPageNumber, totalPages);
+    setPageNumber(clampedPage);
+    window.requestAnimationFrame(() => {
+      pageRefs.current.get(clampedPage)?.scrollIntoView({ block: "start", behavior: "smooth" });
+    });
+  };
 
   const locateSource = async (input: { page: number; x: number; y: number; text?: string }) => {
     setSourceStatus("Finding source...");
@@ -91,52 +100,16 @@ export function PdfPreviewPane({
           <span className="text-sm font-medium">PDF Preview</span>
           {sourceStatus && <span className="ml-2 hidden truncate text-xs text-muted-foreground sm:inline">{sourceStatus}</span>}
         </div>
-        <div className="flex items-center gap-1">
-          {document && (
-            <>
-              <Button
-                variant="ghost"
-                size="icon"
-                title="Previous page"
-                disabled={visiblePage <= 1}
-                onClick={() => setPageNumber((current) => Math.max(1, current - 1))}
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </Button>
-              <span className="min-w-14 text-center text-xs text-muted-foreground">
-                {visiblePage} / {totalPages}
-              </span>
-              <Button
-                variant="ghost"
-                size="icon"
-                title="Next page"
-                disabled={visiblePage >= totalPages}
-                onClick={() => setPageNumber((current) => Math.min(totalPages, current + 1))}
-              >
-                <ChevronRight className="h-4 w-4" />
-              </Button>
-              <Button variant="ghost" size="icon" title="Zoom out" onClick={() => setScale((current) => Math.max(0.6, current - 0.15))}>
-                <Minus className="h-4 w-4" />
-              </Button>
-              <span className="hidden min-w-10 text-center text-xs text-muted-foreground sm:inline">{Math.round(scale * 100)}%</span>
-              <Button variant="ghost" size="icon" title="Zoom in" onClick={() => setScale((current) => Math.min(2.4, current + 0.15))}>
-                <Plus className="h-4 w-4" />
-              </Button>
-              <a
-                className="inline-flex h-9 w-9 items-center justify-center rounded-md hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                href={pdfUrl}
-                download
-                title="Download PDF"
-              >
-                <Download className="h-4 w-4" />
-              </a>
-            </>
-          )}
-          <Button variant="outline" size="sm" onClick={onReload}>
-            <RefreshCw className="h-4 w-4" />
-            Reload
-          </Button>
-        </div>
+        <PdfPreviewToolbar
+          hasDocument={Boolean(document)}
+          pageNumber={visiblePage}
+          totalPages={totalPages}
+          scale={scale}
+          pdfUrl={pdfUrl}
+          onPageChange={goToPage}
+          onScaleChange={setScale}
+          onReload={onReload}
+        />
       </div>
       {compileJob?.status === "success" ? (
         <div className="min-h-0 flex-1 overflow-auto p-4">
@@ -144,8 +117,17 @@ export function PdfPreviewPane({
           {loading && <div className="rounded-md border border-border bg-white p-4 text-sm text-muted-foreground">Loading PDF...</div>}
           {error && <div className="rounded-md bg-destructive p-4 text-sm text-destructive-foreground">{error}</div>}
           {document && !loading && (
-            <div className="mx-auto mt-4 flex w-fit min-w-0 flex-col items-center first:mt-0">
-              <PdfPageCanvas document={document} pageNumber={visiblePage} scale={scale} onSourceRequest={(input) => void locateSource(input)} />
+            <div className="mx-auto mt-4 flex w-fit min-w-0 flex-col items-center gap-5 first:mt-0">
+              {pageNumbers.map((page) => (
+                <div
+                  key={page}
+                  ref={(element) => {
+                    pageRefs.current.set(page, element);
+                  }}
+                >
+                  <PdfPageCanvas document={document} pageNumber={page} scale={scale} onSourceRequest={(input) => void locateSource(input)} />
+                </div>
+              ))}
             </div>
           )}
         </div>
@@ -161,4 +143,9 @@ export function PdfPreviewPane({
       )}
     </div>
   );
+}
+
+function clampPage(pageNumber: number, totalPages: number): number {
+  if (!Number.isFinite(pageNumber)) return 1;
+  return Math.min(Math.max(1, Math.round(pageNumber)), Math.max(totalPages, 1));
 }
