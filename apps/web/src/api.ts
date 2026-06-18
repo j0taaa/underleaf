@@ -110,7 +110,7 @@ export type ProjectSnapshotDetail = ProjectSnapshot & {
   files: Array<{ path: string; size: number }>;
 };
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:3001";
+const API_BASE = import.meta.env.VITE_API_BASE ?? (import.meta.env.PROD ? "" : "http://localhost:3001");
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);

@@ -3,6 +3,7 @@ import path from "node:path";
 export type ServerConfig = {
   databaseUrl: string;
   dataDir: string;
+  staticDir: string | null;
   latexEngine: "auto" | "latexmk" | "tectonic";
   latexmkBin: string;
   tectonicBin: string;
@@ -16,6 +17,7 @@ export function getConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
   return {
     dataDir,
     databaseUrl: overrides.databaseUrl ?? process.env.DATABASE_URL ?? path.join(dataDir, "underleaf.sqlite"),
+    staticDir: overrides.staticDir ?? process.env.UNDERLEAF_STATIC_DIR ?? null,
     latexEngine: overrides.latexEngine ?? resolveLatexEngine(process.env.LATEX_ENGINE),
     latexmkBin: overrides.latexmkBin ?? process.env.LATEXMK_BIN ?? "latexmk",
     tectonicBin: overrides.tectonicBin ?? process.env.TECTONIC_BIN ?? "tectonic",

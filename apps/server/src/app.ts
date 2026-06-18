@@ -1,5 +1,6 @@
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
+import staticPlugin from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -73,6 +74,13 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
       files: 100
     }
   });
+
+  if (config.staticDir) {
+    app.register(staticPlugin, {
+      root: config.staticDir,
+      prefix: "/"
+    });
+  }
 
   app.get("/api/health", async () => ({ ok: true }));
 
@@ -524,6 +532,16 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
     const textLocation = await locateSourceByText(db, request.params.projectId, root, request.body.text ?? "");
     return textLocation;
   });
+
+  if (config.staticDir) {
+    app.setNotFoundHandler((request, reply) => {
+      if (request.method === "GET" && !request.url.startsWith("/api/")) {
+        return reply.sendFile("index.html");
+      }
+
+      return reply.code(404).send({ message: "Not found" });
+    });
+  }
 
   return app;
 }
