@@ -7,9 +7,12 @@ export type ProjectRow = {
   ownerId: string;
   name: string;
   rootFilePath: string | null;
+  compileEngine: CompileEngine;
   createdAt: string;
   updatedAt: string;
 };
+
+export type CompileEngine = "pdflatex" | "xelatex" | "lualatex";
 
 export type FileRow = {
   id: string;
@@ -82,6 +85,7 @@ export function createDb(databaseUrl: string) {
       owner_id TEXT NOT NULL REFERENCES users(id),
       name TEXT NOT NULL,
       root_file_path TEXT,
+      compile_engine TEXT NOT NULL DEFAULT 'pdflatex',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -128,6 +132,7 @@ export function createDb(databaseUrl: string) {
 
   ensureColumn(db, "compile_jobs", "diagnostics", "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(db, "projects", "root_file_path", "TEXT");
+  ensureColumn(db, "projects", "compile_engine", "TEXT NOT NULL DEFAULT 'pdflatex'");
 
   db.prepare(
     "INSERT OR IGNORE INTO users (id, email, display_name, created_at) VALUES (?, ?, ?, ?)"
@@ -136,17 +141,18 @@ export function createDb(databaseUrl: string) {
   return {
     close: () => db.close(),
     listProjects(): ProjectRow[] {
-      return db.prepare("SELECT id, owner_id as ownerId, name, root_file_path as rootFilePath, created_at as createdAt, updated_at as updatedAt FROM projects ORDER BY updated_at DESC").all() as ProjectRow[];
+      return db.prepare("SELECT id, owner_id as ownerId, name, root_file_path as rootFilePath, compile_engine as compileEngine, created_at as createdAt, updated_at as updatedAt FROM projects ORDER BY updated_at DESC").all() as ProjectRow[];
     },
     getProject(id: string): ProjectRow | undefined {
-      return db.prepare("SELECT id, owner_id as ownerId, name, root_file_path as rootFilePath, created_at as createdAt, updated_at as updatedAt FROM projects WHERE id = ?").get(id) as ProjectRow | undefined;
+      return db.prepare("SELECT id, owner_id as ownerId, name, root_file_path as rootFilePath, compile_engine as compileEngine, created_at as createdAt, updated_at as updatedAt FROM projects WHERE id = ?").get(id) as ProjectRow | undefined;
     },
     createProject(project: ProjectRow): void {
-      db.prepare("INSERT INTO projects (id, owner_id, name, root_file_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)").run(
+      db.prepare("INSERT INTO projects (id, owner_id, name, root_file_path, compile_engine, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
         project.id,
         project.ownerId,
         project.name,
         project.rootFilePath,
+        project.compileEngine,
         project.createdAt,
         project.updatedAt
       );
@@ -157,6 +163,10 @@ export function createDb(databaseUrl: string) {
     },
     updateProjectRootFile(projectId: string, rootFilePath: string | null, updatedAt: string): boolean {
       const result = db.prepare("UPDATE projects SET root_file_path = ?, updated_at = ? WHERE id = ?").run(rootFilePath, updatedAt, projectId);
+      return result.changes > 0;
+    },
+    updateProjectCompileEngine(projectId: string, compileEngine: CompileEngine, updatedAt: string): boolean {
+      const result = db.prepare("UPDATE projects SET compile_engine = ?, updated_at = ? WHERE id = ?").run(compileEngine, updatedAt, projectId);
       return result.changes > 0;
     },
     deleteProject(id: string): boolean {

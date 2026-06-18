@@ -7,13 +7,13 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { nanoid } from "nanoid";
 import { type ServerConfig } from "./config.js";
-import { type CompileDiagnosticRow, type CompileJobRow, type FileRow, type FolderRow, type ProjectRow, type UnderleafDb } from "./db.js";
+import { type CompileDiagnosticRow, type CompileEngine, type CompileJobRow, type FileRow, type FolderRow, type ProjectRow, type UnderleafDb } from "./db.js";
 import { ensureParentDir, normalizeProjectPath, projectFilePath, projectRoot } from "./paths.js";
 import { resolveTemplate, templates } from "./templates.js";
 
 type CreateProjectBody = { name?: string; template?: string };
 type ImportProjectQuery = { name?: string };
-type UpdateProjectBody = { name?: string; rootFilePath?: string | null };
+type UpdateProjectBody = { name?: string; rootFilePath?: string | null; compileEngine?: string };
 type CreateFileBody = { path?: string; content?: string };
 type UpdateFileBody = { content?: string };
 type RenamePathBody = { path?: string };
@@ -86,6 +86,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
       ownerId: "local-user",
       name: request.body.name?.trim() || "Untitled Project",
       rootFilePath: templateRootFile(Object.keys(template.files)),
+      compileEngine: "pdflatex" as const,
       createdAt: now,
       updatedAt: now
     };
@@ -152,6 +153,12 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
         if (!rootFilePath.ok) return reply.code(rootFilePath.statusCode).send({ message: rootFilePath.message });
         db.updateProjectRootFile(request.params.projectId, rootFilePath.path, new Date().toISOString());
       }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(request.body, "compileEngine")) {
+      const compileEngine = validateCompileEngine(request.body.compileEngine);
+      if (!compileEngine) return reply.code(400).send({ message: "Compile engine must be pdflatex, xelatex, or lualatex" });
+      db.updateProjectCompileEngine(request.params.projectId, compileEngine, new Date().toISOString());
     }
 
     return db.getProject(request.params.projectId);
@@ -533,11 +540,12 @@ async function runCompile(db: UnderleafDb, config: ServerConfig, projectId: stri
 
   db.createCompileJob(job);
   const startedAt = Date.now();
+  const project = db.getProject(projectId);
   const rootFilePath = resolveCompileRootFile(db, projectId);
 
   try {
     if (!rootFilePath) throw new Error("No LaTeX root document found. Choose a .tex root file in project settings.");
-    const result = await spawnCompiler(config, root, rootFilePath);
+    const result = await spawnCompiler(config, root, rootFilePath, project?.compileEngine ?? "pdflatex");
     const pdfPath = path.join(root, replaceTexExtension(rootFilePath, ".pdf"));
     const hasPdf = await fs.stat(pdfPath).then((stat) => stat.isFile()).catch(() => false);
 
@@ -581,6 +589,11 @@ function validateRootFilePath(
   return { ok: true, path: safePath };
 }
 
+function validateCompileEngine(value: string | undefined): CompileEngine | null {
+  if (value === "pdflatex" || value === "xelatex" || value === "lualatex") return value;
+  return null;
+}
+
 function resolveCompileRootFile(db: UnderleafDb, projectId: string): string | null {
   const project = db.getProject(projectId);
   if (!project) return null;
@@ -606,9 +619,9 @@ function replaceTexExtension(filePath: string, extension: string): string {
   return filePath.replace(/\.tex$/i, extension);
 }
 
-async function spawnCompiler(config: ServerConfig, cwd: string, rootFilePath: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+async function spawnCompiler(config: ServerConfig, cwd: string, rootFilePath: string, compileEngine: CompileEngine): Promise<{ code: number | null; stdout: string; stderr: string }> {
   if (config.latexEngine === "latexmk") {
-    return spawnCommand(config.latexmkBin, ["-pdf", "-synctex=1", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", rootFilePath], cwd);
+    return spawnCommand(config.latexmkBin, [...latexmkEngineArgs(compileEngine), "-synctex=1", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", rootFilePath], cwd);
   }
 
   if (config.latexEngine === "tectonic") {
@@ -616,7 +629,7 @@ async function spawnCompiler(config: ServerConfig, cwd: string, rootFilePath: st
   }
 
   try {
-    return await spawnCommand(config.latexmkBin, ["-pdf", "-synctex=1", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", rootFilePath], cwd);
+    return await spawnCommand(config.latexmkBin, [...latexmkEngineArgs(compileEngine), "-synctex=1", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", rootFilePath], cwd);
   } catch (error) {
     if (!isMissingCommandError(error)) throw error;
 
@@ -634,6 +647,12 @@ async function spawnCompiler(config: ServerConfig, cwd: string, rootFilePath: st
       );
     }
   }
+}
+
+function latexmkEngineArgs(compileEngine: CompileEngine): string[] {
+  if (compileEngine === "xelatex") return ["-xelatex"];
+  if (compileEngine === "lualatex") return ["-lualatex"];
+  return ["-pdf"];
 }
 
 function isMissingCommandError(error: unknown): boolean {
@@ -901,6 +920,7 @@ async function duplicateProject(db: UnderleafDb, config: ServerConfig, sourcePro
     ownerId: sourceProject.ownerId,
     name: `Copy of ${sourceProject.name}`,
     rootFilePath: sourceProject.rootFilePath,
+    compileEngine: sourceProject.compileEngine,
     createdAt: now,
     updatedAt: now
   };
@@ -960,6 +980,7 @@ async function importProjectArchive(db: UnderleafDb, config: ServerConfig, archi
       ownerId: "local-user",
       name: requestedName?.trim() || archiveProjectName(filename),
       rootFilePath: detectRootFilePath(files.map((file) => ({ path: file.path }) as FileRow)),
+      compileEngine: "pdflatex",
       createdAt: now,
       updatedAt: now
     };

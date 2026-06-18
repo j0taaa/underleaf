@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { api, type CompileDiagnostic, type CompileJob, type ProjectFile, type ProjectFileWithContent, type ProjectFolder, type ProjectOutlineItem, type ProjectSearchResult } from "../api";
+import { api, type CompileDiagnostic, type CompileEngine, type CompileJob, type ProjectFile, type ProjectFileWithContent, type ProjectFolder, type ProjectOutlineItem, type ProjectSearchResult } from "../api";
 import { EditorHeader } from "../components/editor/EditorHeader";
 import { EditorLayout } from "../components/editor/EditorLayout";
 import { FileSidebar } from "../components/editor/FileSidebar";
@@ -395,6 +395,18 @@ export function ProjectEditorPage() {
     }
   });
 
+  const updateCompileEngineMutation = useMutation({
+    mutationFn: (compileEngine: CompileEngine) => api.updateProjectCompileEngine(projectId, compileEngine),
+    onSuccess: async (nextProject) => {
+      setCompileOverride(null);
+      queryClient.setQueryData(["project", projectId], nextProject);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["latest-compile", projectId] }),
+        invalidateGitStatus()
+      ]);
+    }
+  });
+
   useEffect(() => {
     if (!projectId || !activeFile || activeFile.projectId !== projectId || !isEditableTextFile(activeFile.path) || content === activeFile.content) return;
     setSaveState("saving");
@@ -531,6 +543,10 @@ export function ProjectEditorPage() {
     await updateRootFileMutation.mutateAsync(rootFilePath);
   };
 
+  const updateCompileEngine = async (compileEngine: CompileEngine) => {
+    await updateCompileEngineMutation.mutateAsync(compileEngine);
+  };
+
   const createSnapshot = async () => {
     await createSnapshotMutation.mutateAsync(snapshotLabel);
   };
@@ -661,12 +677,13 @@ export function ProjectEditorPage() {
         layout={layout}
         compileJob={compileJob}
         compiling={compileMutation.isPending}
-        updatingRootFile={updateRootFileMutation.isPending}
+        updatingRootFile={updateRootFileMutation.isPending || updateCompileEngineMutation.isPending}
         statusText={statusText}
         onProjectNameChange={setProjectName}
         onRenameStart={() => setRenaming(true)}
         onRenameSubmit={() => void renameProject()}
         onRootFileChange={(rootFilePath) => void updateRootFile(rootFilePath)}
+        onCompileEngineChange={(compileEngine) => void updateCompileEngine(compileEngine)}
         onHistoryToggle={() => {
           setSourceControlOpen(false);
           setWordCountOpen(false);

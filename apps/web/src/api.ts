@@ -3,9 +3,12 @@ export type Project = {
   ownerId: string;
   name: string;
   rootFilePath: string | null;
+  compileEngine: CompileEngine;
   createdAt: string;
   updatedAt: string;
 };
+
+export type CompileEngine = "pdflatex" | "xelatex" | "lualatex";
 
 export type ProjectFile = {
   id: string;
@@ -175,6 +178,12 @@ export const api = {
     return request<Project>(`/api/projects/${projectId}`, {
       method: "PATCH",
       body: JSON.stringify({ rootFilePath })
+    });
+  },
+  updateProjectCompileEngine(projectId: string, compileEngine: CompileEngine) {
+    return request<Project>(`/api/projects/${projectId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ compileEngine })
     });
   },
   deleteProject(projectId: string) {

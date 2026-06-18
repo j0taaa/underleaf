@@ -131,6 +131,27 @@ describe("projects and files", () => {
     expect(updatedProject.rootFilePath).toBe("chapters/paper.tex");
   });
 
+  it("sets and validates the project compile engine", async () => {
+    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Engine" } });
+    const project = projectResponse.json<{ id: string; compileEngine: string }>();
+    expect(project.compileEngine).toBe("pdflatex");
+
+    const invalidResponse = await app.inject({
+      method: "PATCH",
+      url: `/api/projects/${project.id}`,
+      payload: { compileEngine: "context" }
+    });
+    expect(invalidResponse.statusCode).toBe(400);
+
+    const engineResponse = await app.inject({
+      method: "PATCH",
+      url: `/api/projects/${project.id}`,
+      payload: { compileEngine: "xelatex" }
+    });
+    expect(engineResponse.statusCode).toBe(200);
+    expect(engineResponse.json<{ compileEngine: string }>().compileEngine).toBe("xelatex");
+  });
+
   it("compiles the selected root document instead of assuming main.tex", async () => {
     const fakeLatexmk = path.join(tmpDir, "fake-latexmk.sh");
     await fs.writeFile(
@@ -187,6 +208,54 @@ describe("projects and files", () => {
     expect(pdfResponse.rawPayload.toString("utf8")).toBe("PDF");
     await expect(fs.stat(path.join(tmpDir, "projects", project.id, "main.pdf"))).rejects.toThrow();
     await expect(fs.stat(path.join(tmpDir, "projects", project.id, "chapters", "paper.pdf"))).resolves.toBeDefined();
+  });
+
+  it("passes the selected compiler engine to latexmk", async () => {
+    const argsPath = path.join(tmpDir, "latexmk-args.txt");
+    const fakeLatexmk = path.join(tmpDir, "fake-latexmk-engine.sh");
+    await fs.writeFile(
+      fakeLatexmk,
+      [
+        "#!/bin/sh",
+        `printf '%s\\n' "$@" > ${JSON.stringify(argsPath)}`,
+        "for arg in \"$@\"; do root=\"$arg\"; done",
+        "base=\"${root%.tex}\"",
+        "printf '%s' PDF > \"$base.pdf\"",
+        "printf 'compiled with args\\n'"
+      ].join("\n"),
+      "utf8"
+    );
+    await fs.chmod(fakeLatexmk, 0o755);
+    await app.close();
+    db.close();
+
+    config = getConfig({
+      dataDir: tmpDir,
+      databaseUrl: path.join(tmpDir, "test.sqlite"),
+      latexEngine: "latexmk",
+      latexmkBin: fakeLatexmk,
+      tectonicBin: "definitely-missing-tectonic",
+      webOrigin: "http://localhost:5173",
+      port: 0
+    });
+    db = createDb(config.databaseUrl);
+    app = buildApp(db, config);
+
+    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Lua" } });
+    const project = projectResponse.json<{ id: string }>();
+    const engineResponse = await app.inject({
+      method: "PATCH",
+      url: `/api/projects/${project.id}`,
+      payload: { compileEngine: "lualatex" }
+    });
+    expect(engineResponse.statusCode).toBe(200);
+
+    const compileResponse = await app.inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
+    expect(compileResponse.statusCode).toBe(200);
+    expect(compileResponse.json<{ status: string }>().status).toBe("success");
+    const args = await fs.readFile(argsPath, "utf8");
+    expect(args).toContain("-lualatex");
+    expect(args).not.toContain("-pdf");
   });
 
   it("creates parent folder metadata for nested files", async () => {
@@ -560,13 +629,19 @@ describe("projects and files", () => {
       url: `/api/projects/${project.id}`,
       payload: { rootFilePath: "chapters/intro.tex" }
     });
+    await app.inject({
+      method: "PATCH",
+      url: `/api/projects/${project.id}`,
+      payload: { compileEngine: "xelatex" }
+    });
 
     const duplicateResponse = await app.inject({ method: "POST", url: `/api/projects/${project.id}/duplicate` });
     expect(duplicateResponse.statusCode).toBe(201);
-    const duplicateProject = duplicateResponse.json<{ id: string; name: string; rootFilePath: string | null }>();
+    const duplicateProject = duplicateResponse.json<{ id: string; name: string; rootFilePath: string | null; compileEngine: string }>();
     expect(duplicateProject.id).not.toBe(project.id);
     expect(duplicateProject.name).toBe("Copy of Original Paper");
     expect(duplicateProject.rootFilePath).toBe("chapters/intro.tex");
+    expect(duplicateProject.compileEngine).toBe("xelatex");
 
     const duplicateFiles = (await app.inject({ method: "GET", url: `/api/projects/${duplicateProject.id}/files` })).json<Array<{ id: string; path: string }>>();
     expect(duplicateFiles.map((file) => file.path).sort()).toEqual(["chapters/intro.tex", "main.tex"]);

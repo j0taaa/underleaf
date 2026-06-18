@@ -1,6 +1,6 @@
 import { BarChart3, ChevronLeft, Download, GitBranch, History, LayoutPanelLeft, Maximize2, PanelRightOpen, Pencil, Play } from "lucide-react";
 import { Link } from "@tanstack/react-router";
-import { api, type CompileJob, type Project, type ProjectFile, type ProjectFileWithContent } from "../../api";
+import { api, type CompileEngine, type CompileJob, type Project, type ProjectFile, type ProjectFileWithContent } from "../../api";
 import type { LayoutMode } from "../../types/editor";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
@@ -22,6 +22,7 @@ export function EditorHeader({
   onRenameStart,
   onRenameSubmit,
   onRootFileChange,
+  onCompileEngineChange,
   onHistoryToggle,
   onSourceControlToggle,
   onWordCountToggle,
@@ -42,6 +43,7 @@ export function EditorHeader({
   onRenameStart: () => void;
   onRenameSubmit: () => void;
   onRootFileChange: (rootFilePath: string | null) => void;
+  onCompileEngineChange: (compileEngine: CompileEngine) => void;
   onHistoryToggle: () => void;
   onSourceControlToggle: () => void;
   onWordCountToggle: () => void;
@@ -109,9 +111,11 @@ export function EditorHeader({
         </Button>
         <ProjectSettingsMenu
           rootFilePath={project.rootFilePath}
+          compileEngine={project.compileEngine}
           files={files}
           updating={updatingRootFile}
           onRootFileChange={onRootFileChange}
+          onCompileEngineChange={onCompileEngineChange}
         />
         <div className="hidden items-center rounded-md border border-border p-0.5 md:flex">
           <Button variant={layout === "split" ? "secondary" : "ghost"} size="icon" title="Split view" onClick={() => onLayoutChange("split")}>
