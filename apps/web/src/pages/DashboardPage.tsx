@@ -29,6 +29,14 @@ export function DashboardPage() {
     }
   });
 
+  const duplicateProjectMutation = useMutation({
+    mutationFn: api.duplicateProject,
+    onSuccess: async (project) => {
+      await queryClient.invalidateQueries({ queryKey: ["projects"] });
+      await navigate({ to: "/projects/$projectId", params: { projectId: project.id } });
+    }
+  });
+
   const importProjectMutation = useMutation({
     mutationFn: api.importProject,
     onSuccess: async (project) => {
@@ -48,6 +56,8 @@ export function DashboardPage() {
         <ProjectList
           projects={projectsQuery.data ?? []}
           loading={projectsQuery.isPending}
+          duplicatingProjectId={duplicateProjectMutation.isPending ? duplicateProjectMutation.variables : null}
+          onDuplicate={(projectId) => duplicateProjectMutation.mutateAsync(projectId).then(() => undefined)}
           onDelete={(projectId) => deleteProjectMutation.mutateAsync(projectId).then(() => undefined)}
         />
       </section>

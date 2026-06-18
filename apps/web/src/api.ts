@@ -150,6 +150,9 @@ export const api = {
       body: JSON.stringify(input)
     });
   },
+  duplicateProject(projectId: string) {
+    return request<Project>(`/api/projects/${projectId}/duplicate`, { method: "POST" });
+  },
   importProject(input: { file: File; name?: string }) {
     const formData = new FormData();
     formData.append("file", input.file, input.file.name);

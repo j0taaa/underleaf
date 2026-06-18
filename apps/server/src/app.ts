@@ -120,6 +120,14 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
     }
   });
 
+  app.post<{ Params: { projectId: string } }>("/api/projects/:projectId/duplicate", async (request, reply) => {
+    const project = db.getProject(request.params.projectId);
+    if (!project) return reply.code(404).send({ message: "Project not found" });
+
+    const duplicate = await duplicateProject(db, config, project);
+    return reply.code(201).send(duplicate);
+  });
+
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId", async (request, reply) => {
     const project = db.getProject(request.params.projectId);
     if (!project) return reply.code(404).send({ message: "Project not found" });
@@ -884,6 +892,52 @@ async function createProjectArchiveSource(db: UnderleafDb, config: ServerConfig,
   }
 
   return sourceDir;
+}
+
+async function duplicateProject(db: UnderleafDb, config: ServerConfig, sourceProject: ProjectRow): Promise<ProjectRow> {
+  const now = new Date().toISOString();
+  const project: ProjectRow = {
+    id: nanoid(),
+    ownerId: sourceProject.ownerId,
+    name: `Copy of ${sourceProject.name}`,
+    rootFilePath: sourceProject.rootFilePath,
+    createdAt: now,
+    updatedAt: now
+  };
+  const sourceRoot = path.resolve(projectRoot(config.dataDir, sourceProject.id));
+  const sourceRootPrefix = `${sourceRoot}${path.sep}`;
+
+  try {
+    await fs.mkdir(projectRoot(config.dataDir, project.id), { recursive: true });
+    db.createProject(project);
+
+    for (const folder of db.listFolders(sourceProject.id)) {
+      db.createFolder({ id: nanoid(), projectId: project.id, path: folder.path, createdAt: now, updatedAt: now });
+    }
+
+    const duplicatedPaths = new Set<string>();
+    for (const sourceFile of db.listFiles(sourceProject.id)) {
+      const source = path.resolve(projectFilePath(config.dataDir, sourceProject.id, sourceFile.path));
+      if (source !== sourceRoot && !source.startsWith(sourceRootPrefix)) continue;
+
+      const target = projectFilePath(config.dataDir, project.id, sourceFile.path);
+      await ensureParentDir(target);
+      await fs.copyFile(source, target);
+      duplicatedPaths.add(sourceFile.path);
+      db.createFile({ id: nanoid(), projectId: project.id, path: sourceFile.path, createdAt: now, updatedAt: now });
+    }
+
+    if (project.rootFilePath && !duplicatedPaths.has(project.rootFilePath)) {
+      project.rootFilePath = null;
+      db.updateProjectRootFile(project.id, null, now);
+    }
+
+    return db.getProject(project.id) ?? project;
+  } catch (error) {
+    if (db.getProject(project.id)) db.deleteProject(project.id);
+    await fs.rm(projectRoot(config.dataDir, project.id), { recursive: true, force: true });
+    throw error;
+  }
 }
 
 async function importProjectArchive(db: UnderleafDb, config: ServerConfig, archive: Buffer, filename: string, requestedName: string | undefined): Promise<ProjectRow> {

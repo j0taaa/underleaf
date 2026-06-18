@@ -1,4 +1,4 @@
-import { Download, Trash2 } from "lucide-react";
+import { Copy, Download, Trash2 } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { api, type Project } from "../../api";
 import { Button } from "../ui/button";
@@ -6,10 +6,14 @@ import { Button } from "../ui/button";
 export function ProjectList({
   projects,
   loading,
+  duplicatingProjectId,
+  onDuplicate,
   onDelete
 }: {
   projects: Project[];
   loading: boolean;
+  duplicatingProjectId?: string | null;
+  onDuplicate: (projectId: string) => Promise<void>;
   onDelete: (projectId: string) => Promise<void>;
 }) {
   return (
@@ -38,6 +42,15 @@ export function ProjectList({
               >
                 <Download className="h-4 w-4" />
               </a>
+              <Button
+                variant="ghost"
+                size="icon"
+                title="Duplicate project"
+                disabled={duplicatingProjectId === project.id}
+                onClick={() => void onDuplicate(project.id)}
+              >
+                <Copy className="h-4 w-4" />
+              </Button>
               <Button variant="ghost" size="icon" title="Delete project" onClick={() => void onDelete(project.id)}>
                 <Trash2 className="h-4 w-4" />
               </Button>
