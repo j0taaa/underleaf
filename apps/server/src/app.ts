@@ -1,12 +1,14 @@
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import staticPlugin from "@fastify/static";
-import Fastify, { type FastifyInstance } from "fastify";
+import { fromNodeHeaders } from "better-auth/node";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { nanoid } from "nanoid";
+import { createAuth, type UnderleafAuth } from "./auth.js";
 import { type ServerConfig } from "./config.js";
 import { type CompileDiagnosticRow, type CompileEngine, type CompileJobRow, type FileRow, type FolderRow, type ProjectRow, type UnderleafDb } from "./db.js";
 import { ensureParentDir, normalizeProjectPath, projectFilePath, projectRoot } from "./paths.js";
@@ -61,12 +63,14 @@ type SnapshotManifest = {
   createdAt: string;
   files: Array<{ path: string; size: number }>;
 };
+type AuthenticatedRequest = FastifyRequest & { userId?: string };
 
-export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance {
+export function buildApp(db: UnderleafDb, config: ServerConfig, auth: UnderleafAuth = createAuth(config)): FastifyInstance {
   const app = Fastify({ logger: true });
 
   app.register(cors, {
-    origin: config.webOrigin
+    origin: config.trustedOrigins,
+    credentials: true
   });
   app.register(multipart, {
     limits: {
@@ -84,14 +88,45 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
 
   app.get("/api/health", async () => ({ ok: true }));
 
-  app.get("/api/projects", async () => db.listProjects());
+  app.route({
+    method: ["GET", "POST"],
+    url: "/api/auth/*",
+    async handler(request, reply) {
+      const url = new URL(request.url, config.authUrl);
+      const response = await auth.handler(
+        new Request(url.toString(), {
+          method: request.method,
+          headers: fromNodeHeaders(request.headers),
+          body: request.body ? JSON.stringify(request.body) : undefined
+        })
+      );
+
+      reply.status(response.status);
+      const responseHeaders = response.headers as Headers & { getSetCookie?: () => string[] };
+      const setCookies = responseHeaders.getSetCookie?.() ?? [];
+      response.headers.forEach((value, key) => {
+        if (key.toLowerCase() !== "set-cookie") reply.header(key, value);
+      });
+      if (setCookies.length > 0) reply.header("set-cookie", setCookies);
+      return reply.send(response.body ? Buffer.from(await response.arrayBuffer()) : null);
+    }
+  });
+
+  app.addHook("preHandler", async (request, reply) => {
+    if (!request.url.startsWith("/api/projects")) return;
+    const session = await auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
+    if (!session) return reply.code(401).send({ message: "Unauthorized" });
+    (request as AuthenticatedRequest).userId = session.user.id;
+  });
+
+  app.get("/api/projects", async (request) => db.listProjects(requireUserId(request)));
 
   app.post<{ Body: CreateProjectBody }>("/api/projects", async (request, reply) => {
     const now = new Date().toISOString();
     const template = templates[resolveTemplate(request.body.template)];
     const project = {
       id: nanoid(),
-      ownerId: "local-user",
+      ownerId: requireUserId(request),
       name: request.body.name?.trim() || "Untitled Project",
       rootFilePath: templateRootFile(Object.keys(template.files)),
       compileEngine: "pdflatex" as const,
@@ -123,7 +158,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
 
     const buffer = await archive.toBuffer();
     try {
-      const project = await importProjectArchive(db, config, buffer, archive.filename, request.query.name);
+      const project = await importProjectArchive(db, config, buffer, archive.filename, request.query.name, requireUserId(request));
       return reply.code(201).send(project);
     } catch (error) {
       return reply.code(400).send({ message: error instanceof Error ? error.message : "Unable to import archive" });
@@ -131,7 +166,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.post<{ Params: { projectId: string } }>("/api/projects/:projectId/duplicate", async (request, reply) => {
-    const project = db.getProject(request.params.projectId);
+    const project = getOwnedProject(db, request, reply);
     if (!project) return reply.code(404).send({ message: "Project not found" });
 
     const duplicate = await duplicateProject(db, config, project);
@@ -139,13 +174,13 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId", async (request, reply) => {
-    const project = db.getProject(request.params.projectId);
+    const project = getOwnedProject(db, request, reply);
     if (!project) return reply.code(404).send({ message: "Project not found" });
     return project;
   });
 
   app.patch<{ Params: { projectId: string }; Body: UpdateProjectBody }>("/api/projects/:projectId", async (request, reply) => {
-    const project = db.getProject(request.params.projectId);
+    const project = getOwnedProject(db, request, reply);
     if (!project) return reply.code(404).send({ message: "Project not found" });
 
     if (Object.prototype.hasOwnProperty.call(request.body, "name")) {
@@ -175,18 +210,18 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
       db.updateProjectAutoCompile(request.params.projectId, request.body.autoCompile, new Date().toISOString());
     }
 
-    return db.getProject(request.params.projectId);
+    return db.getProject(request.params.projectId, requireUserId(request));
   });
 
   app.delete<{ Params: { projectId: string } }>("/api/projects/:projectId", async (request, reply) => {
-    const deleted = db.deleteProject(request.params.projectId);
-    if (!deleted) return reply.code(404).send({ message: "Project not found" });
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
+    db.deleteProject(request.params.projectId);
     await fs.rm(projectRoot(config.dataDir, request.params.projectId), { recursive: true, force: true });
     return reply.code(204).send();
   });
 
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/download", async (request, reply) => {
-    const project = db.getProject(request.params.projectId);
+    const project = getOwnedProject(db, request, reply);
     if (!project) return reply.code(404).send({ message: "Project not found" });
 
     const sourceDir = await createProjectArchiveSource(db, config, project.id);
@@ -202,17 +237,17 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/files", async (request, reply) => {
-    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     return db.listFiles(request.params.projectId);
   });
 
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/folders", async (request, reply) => {
-    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     return db.listFolders(request.params.projectId);
   });
 
   app.get<{ Params: { projectId: string }; Querystring: ProjectSearchQuery }>("/api/projects/:projectId/search", async (request, reply) => {
-    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
 
     const query = request.query.q?.trim() ?? "";
     if (query.length < 2) return [];
@@ -222,33 +257,33 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/outline", async (request, reply) => {
-    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     return buildProjectOutline(db, config, request.params.projectId);
   });
 
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/word-count", async (request, reply) => {
-    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     return countProjectWords(db, config, request.params.projectId);
   });
 
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/symbols", async (request, reply) => {
-    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     return collectProjectSymbols(db, config, request.params.projectId);
   });
 
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/git/status", async (request, reply) => {
-    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     return getProjectGitStatus(config, request.params.projectId);
   });
 
   app.post<{ Params: { projectId: string } }>("/api/projects/:projectId/git/init", async (request, reply) => {
-    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     await initProjectGit(config, request.params.projectId);
     return getProjectGitStatus(config, request.params.projectId);
   });
 
   app.post<{ Params: { projectId: string }; Body: GitCommitBody }>("/api/projects/:projectId/git/commit", async (request, reply) => {
-    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
 
     const message = request.body.message?.trim();
     if (!message) return reply.code(400).send({ message: "Commit message is required" });
@@ -262,12 +297,12 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/snapshots", async (request, reply) => {
-    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     return db.listSnapshots(request.params.projectId);
   });
 
   app.post<{ Params: { projectId: string }; Body: CreateSnapshotBody }>("/api/projects/:projectId/snapshots", async (request, reply) => {
-    const project = db.getProject(request.params.projectId);
+    const project = getOwnedProject(db, request, reply);
     if (!project) return reply.code(404).send({ message: "Project not found" });
 
     const snapshot = await createProjectSnapshot(db, config, project.id, request.body.label);
@@ -275,6 +310,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.get<{ Params: { projectId: string; snapshotId: string } }>("/api/projects/:projectId/snapshots/:snapshotId", async (request, reply) => {
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     const snapshot = db.getSnapshot(request.params.projectId, request.params.snapshotId);
     if (!snapshot) return reply.code(404).send({ message: "Snapshot not found" });
 
@@ -283,6 +319,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.post<{ Params: { projectId: string; snapshotId: string } }>("/api/projects/:projectId/snapshots/:snapshotId/restore", async (request, reply) => {
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     const snapshot = db.getSnapshot(request.params.projectId, request.params.snapshotId);
     if (!snapshot) return reply.code(404).send({ message: "Snapshot not found" });
 
@@ -291,6 +328,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.get<{ Params: { projectId: string; snapshotId: string } }>("/api/projects/:projectId/snapshots/:snapshotId/download", async (request, reply) => {
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     const snapshot = db.getSnapshot(request.params.projectId, request.params.snapshotId);
     if (!snapshot) return reply.code(404).send({ message: "Snapshot not found" });
 
@@ -303,6 +341,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.get<{ Params: { projectId: string; fileId: string } }>("/api/projects/:projectId/files/:fileId", async (request, reply) => {
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     const file = db.getFile(request.params.projectId, request.params.fileId);
     if (!file) return reply.code(404).send({ message: "File not found" });
 
@@ -311,6 +350,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.get<{ Params: { projectId: string; fileId: string } }>("/api/projects/:projectId/files/:fileId/raw", async (request, reply) => {
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     const file = db.getFile(request.params.projectId, request.params.fileId);
     if (!file) return reply.code(404).send({ message: "File not found" });
 
@@ -325,6 +365,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.put<{ Params: { projectId: string; fileId: string }; Body: UpdateFileBody }>("/api/projects/:projectId/files/:fileId/content", async (request, reply) => {
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     const file = db.getFile(request.params.projectId, request.params.fileId);
     if (!file) return reply.code(404).send({ message: "File not found" });
 
@@ -334,6 +375,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.patch<{ Params: { projectId: string; fileId: string }; Body: RenamePathBody }>("/api/projects/:projectId/files/:fileId", async (request, reply) => {
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     const file = db.getFile(request.params.projectId, request.params.fileId);
     if (!file) return reply.code(404).send({ message: "File not found" });
 
@@ -360,7 +402,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.post<{ Params: { projectId: string }; Body: CreateFileBody }>("/api/projects/:projectId/files", async (request, reply) => {
-    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
 
     let safePath: string;
     try {
@@ -385,7 +427,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.post<{ Params: { projectId: string } }>("/api/projects/:projectId/files/upload", async (request, reply) => {
-    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     if (!request.isMultipart()) return reply.code(415).send({ message: "Expected multipart upload" });
 
     const requestedPaths = new Map<string, string>();
@@ -423,7 +465,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.post<{ Params: { projectId: string }; Body: RenamePathBody }>("/api/projects/:projectId/folders", async (request, reply) => {
-    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
 
     let safePath: string;
     try {
@@ -445,6 +487,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.patch<{ Params: { projectId: string; folderId: string }; Body: RenamePathBody }>("/api/projects/:projectId/folders/:folderId", async (request, reply) => {
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     const folder = db.getFolder(request.params.projectId, request.params.folderId);
     if (!folder) return reply.code(404).send({ message: "Folder not found" });
 
@@ -472,6 +515,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.delete<{ Params: { projectId: string; fileId: string } }>("/api/projects/:projectId/files/:fileId", async (request, reply) => {
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     const file = db.getFile(request.params.projectId, request.params.fileId);
     if (!file) return reply.code(404).send({ message: "File not found" });
     db.deleteFile(file.projectId, file.id);
@@ -480,6 +524,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.delete<{ Params: { projectId: string; folderId: string } }>("/api/projects/:projectId/folders/:folderId", async (request, reply) => {
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     const folder = db.getFolder(request.params.projectId, request.params.folderId);
     if (!folder) return reply.code(404).send({ message: "Folder not found" });
     db.deleteFolder(folder.projectId, folder.id, folder.path);
@@ -488,7 +533,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.post<{ Params: { projectId: string } }>("/api/projects/:projectId/compile", async (request, reply) => {
-    const project = db.getProject(request.params.projectId);
+    const project = getOwnedProject(db, request, reply);
     if (!project) return reply.code(404).send({ message: "Project not found" });
 
     const job = await runCompile(db, config, project.id);
@@ -496,11 +541,12 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/compile/latest", async (request, reply) => {
-    if (!db.getProject(request.params.projectId)) return reply.code(404).send({ message: "Project not found" });
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     return db.latestCompileJob(request.params.projectId) ?? null;
   });
 
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/pdf", async (request, reply) => {
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     const latest = db.latestCompileJob(request.params.projectId);
     if (!latest?.pdfPath || latest.status !== "success") return reply.code(404).send({ message: "PDF not found" });
 
@@ -512,6 +558,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   });
 
   app.post<{ Params: { projectId: string }; Body: PdfSourceBody }>("/api/projects/:projectId/pdf/source", async (request, reply) => {
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
     const latest = db.latestCompileJob(request.params.projectId);
     if (!latest?.pdfPath || latest.status !== "success") return reply.code(404).send({ message: "PDF not found" });
 
@@ -544,6 +591,20 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
   }
 
   return app;
+}
+
+function requireUserId(request: FastifyRequest): string {
+  const userId = (request as AuthenticatedRequest).userId;
+  if (!userId) throw new Error("Authenticated user was not attached to request");
+  return userId;
+}
+
+function getOwnedProject(
+  db: UnderleafDb,
+  request: FastifyRequest<{ Params: { projectId: string } }>,
+  _reply: FastifyReply
+): ProjectRow | undefined {
+  return db.getProject(request.params.projectId, requireUserId(request));
 }
 
 async function runCompile(db: UnderleafDb, config: ServerConfig, projectId: string): Promise<CompileJobRow> {
@@ -985,7 +1046,7 @@ async function duplicateProject(db: UnderleafDb, config: ServerConfig, sourcePro
   }
 }
 
-async function importProjectArchive(db: UnderleafDb, config: ServerConfig, archive: Buffer, filename: string, requestedName: string | undefined): Promise<ProjectRow> {
+async function importProjectArchive(db: UnderleafDb, config: ServerConfig, archive: Buffer, filename: string, requestedName: string | undefined, ownerId: string): Promise<ProjectRow> {
   const now = new Date().toISOString();
   const importRoot = await fs.mkdtemp(path.join(os.tmpdir(), "underleaf-import-"));
   const archivePath = path.join(importRoot, filename || "project.tar.gz");
@@ -1002,7 +1063,7 @@ async function importProjectArchive(db: UnderleafDb, config: ServerConfig, archi
 
     const project: ProjectRow = {
       id: projectId,
-      ownerId: "local-user",
+      ownerId,
       name: requestedName?.trim() || archiveProjectName(filename),
       rootFilePath: detectRootFilePath(files.map((file) => ({ path: file.path }) as FileRow)),
       compileEngine: "pdflatex",

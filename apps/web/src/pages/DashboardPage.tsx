@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { api } from "../api";
+import { authClient } from "../authClient";
 import { AppHeader } from "../components/dashboard/AppHeader";
 import { CreateProjectForm } from "../components/dashboard/CreateProjectForm";
 import { ImportProjectForm } from "../components/dashboard/ImportProjectForm";
@@ -9,6 +10,7 @@ import { ProjectList } from "../components/dashboard/ProjectList";
 export function DashboardPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const session = authClient.useSession();
   const projectsQuery = useQuery({
     queryKey: ["projects"],
     queryFn: api.listProjects
@@ -47,7 +49,16 @@ export function DashboardPage() {
 
   return (
     <main className="min-h-screen">
-      <AppHeader onRefresh={() => void projectsQuery.refetch()} />
+      <AppHeader
+        email={session.data?.user.email ?? ""}
+        onRefresh={() => void projectsQuery.refetch()}
+        onSignOut={() => {
+          void authClient.signOut().then(async () => {
+            queryClient.clear();
+            await navigate({ to: "/auth" });
+          });
+        }}
+      />
       <section className="mx-auto grid max-w-6xl gap-6 px-4 py-6 lg:grid-cols-[360px_minmax(0,1fr)]">
         <div className="grid content-start gap-4">
           <CreateProjectForm onCreate={(input) => createProjectMutation.mutateAsync(input).then(() => undefined)} />

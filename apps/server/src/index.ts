@@ -3,7 +3,7 @@ import { createDb } from "./db.js";
 import { buildApp } from "./app.js";
 
 const config = getConfig();
-const db = createDb(config.databaseUrl);
+const db = createDb(config.databaseUrl, { dataDir: config.dataDir });
 const app = buildApp(db, config);
 
 const close = async () => {

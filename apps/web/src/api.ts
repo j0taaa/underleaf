@@ -110,7 +110,7 @@ export type ProjectSnapshotDetail = ProjectSnapshot & {
   files: Array<{ path: string; size: number }>;
 };
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? (import.meta.env.PROD ? "" : "http://localhost:3001");
+const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
@@ -120,6 +120,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
+    credentials: "include",
     headers
   });
 
@@ -134,7 +135,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   pdfUrl(projectId: string, nonce: number) {
-    return `${API_BASE}/api/projects/${projectId}/pdf?t=${nonce}`;
+    return withAuthNonce(`${API_BASE}/api/projects/${projectId}/pdf`, nonce);
   },
   fileRawUrl(projectId: string, fileId: string) {
     return `${API_BASE}/api/projects/${projectId}/files/${fileId}/raw`;
@@ -304,3 +305,7 @@ export const api = {
     });
   }
 };
+
+function withAuthNonce(url: string, nonce: number) {
+  return `${url}?t=${nonce}`;
+}

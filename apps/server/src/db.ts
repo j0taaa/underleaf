@@ -66,8 +66,9 @@ export type ProjectSnapshotRow = {
 };
 
 export type UnderleafDb = ReturnType<typeof createDb>;
+type CreateDbOptions = { dataDir?: string };
 
-export function createDb(databaseUrl: string) {
+export function createDb(databaseUrl: string, options: CreateDbOptions = {}) {
   fs.mkdirSync(path.dirname(databaseUrl), { recursive: true });
   const db = new Database(databaseUrl);
 
@@ -78,7 +79,46 @@ export function createDb(databaseUrl: string) {
       id TEXT PRIMARY KEY,
       email TEXT NOT NULL UNIQUE,
       display_name TEXT NOT NULL,
-      created_at TEXT NOT NULL
+      email_verified INTEGER NOT NULL DEFAULT 0,
+      image TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS session (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token TEXT NOT NULL UNIQUE,
+      expires_at INTEGER NOT NULL,
+      ip_address TEXT,
+      user_agent TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS account (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      account_id TEXT NOT NULL,
+      provider_id TEXT NOT NULL,
+      access_token TEXT,
+      refresh_token TEXT,
+      id_token TEXT,
+      access_token_expires_at INTEGER,
+      refresh_token_expires_at INTEGER,
+      scope TEXT,
+      password TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS verification (
+      id TEXT PRIMARY KEY,
+      identifier TEXT NOT NULL,
+      value TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      created_at INTEGER,
+      updated_at INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS projects (
@@ -130,25 +170,37 @@ export function createDb(databaseUrl: string) {
       file_count INTEGER NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS app_meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_session_user_id ON session(user_id);
+    CREATE INDEX IF NOT EXISTS idx_account_user_id ON account(user_id);
+    CREATE INDEX IF NOT EXISTS idx_verification_identifier ON verification(identifier);
   `);
 
+  ensureColumn(db, "users", "email_verified", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "users", "image", "TEXT");
+  ensureColumn(db, "users", "updated_at", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "compile_jobs", "diagnostics", "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(db, "projects", "root_file_path", "TEXT");
   ensureColumn(db, "projects", "compile_engine", "TEXT NOT NULL DEFAULT 'pdflatex'");
   ensureColumn(db, "projects", "auto_compile", "INTEGER NOT NULL DEFAULT 0");
 
-  db.prepare(
-    "INSERT OR IGNORE INTO users (id, email, display_name, created_at) VALUES (?, ?, ?, ?)"
-  ).run("local-user", "local@underleaf.invalid", "Local User", new Date().toISOString());
+  resetLegacyProjects(db, options.dataDir);
 
   return {
     close: () => db.close(),
-    listProjects(): ProjectRow[] {
-      const rows = db.prepare("SELECT id, owner_id as ownerId, name, root_file_path as rootFilePath, compile_engine as compileEngine, auto_compile as autoCompile, created_at as createdAt, updated_at as updatedAt FROM projects ORDER BY updated_at DESC").all() as ProjectSelectRow[];
+    listProjects(ownerId: string): ProjectRow[] {
+      const rows = db.prepare("SELECT id, owner_id as ownerId, name, root_file_path as rootFilePath, compile_engine as compileEngine, auto_compile as autoCompile, created_at as createdAt, updated_at as updatedAt FROM projects WHERE owner_id = ? ORDER BY updated_at DESC").all(ownerId) as ProjectSelectRow[];
       return rows.map(hydrateProject);
     },
-    getProject(id: string): ProjectRow | undefined {
-      const row = db.prepare("SELECT id, owner_id as ownerId, name, root_file_path as rootFilePath, compile_engine as compileEngine, auto_compile as autoCompile, created_at as createdAt, updated_at as updatedAt FROM projects WHERE id = ?").get(id) as ProjectSelectRow | undefined;
+    getProject(id: string, ownerId?: string): ProjectRow | undefined {
+      const row = ownerId
+        ? db.prepare("SELECT id, owner_id as ownerId, name, root_file_path as rootFilePath, compile_engine as compileEngine, auto_compile as autoCompile, created_at as createdAt, updated_at as updatedAt FROM projects WHERE id = ? AND owner_id = ?").get(id, ownerId) as ProjectSelectRow | undefined
+        : db.prepare("SELECT id, owner_id as ownerId, name, root_file_path as rootFilePath, compile_engine as compileEngine, auto_compile as autoCompile, created_at as createdAt, updated_at as updatedAt FROM projects WHERE id = ?").get(id) as ProjectSelectRow | undefined;
       return row ? hydrateProject(row) : undefined;
     },
     createProject(project: ProjectRow): void {
@@ -367,6 +419,27 @@ function ensureColumn(db: Database.Database, table: string, column: string, defi
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   if (!columns.some((item) => item.name === column)) {
     db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
+  }
+}
+
+function resetLegacyProjects(db: Database.Database, dataDir: string | undefined): void {
+  const marker = db.prepare("SELECT value FROM app_meta WHERE key = ?").get("auth_migration_v1") as { value: string } | undefined;
+  if (marker) return;
+
+  const transaction = db.transaction(() => {
+    db.prepare("DELETE FROM project_snapshots").run();
+    db.prepare("DELETE FROM compile_jobs").run();
+    db.prepare("DELETE FROM files").run();
+    db.prepare("DELETE FROM folders").run();
+    db.prepare("DELETE FROM projects").run();
+    db.prepare("DELETE FROM users WHERE id = ?").run("local-user");
+    db.prepare("INSERT INTO app_meta (key, value) VALUES (?, ?)").run("auth_migration_v1", new Date().toISOString());
+  });
+  transaction();
+
+  if (dataDir) {
+    fs.rmSync(path.join(dataDir, "projects"), { recursive: true, force: true });
+    fs.rmSync(path.join(dataDir, "snapshots"), { recursive: true, force: true });
   }
 }
 

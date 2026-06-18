@@ -19,11 +19,11 @@ describe("AssetPreviewPane", () => {
 
     expect(screen.getByRole("img", { name: "figures/logo.png" })).toHaveAttribute(
       "src",
-      "http://localhost:3001/api/projects/project/files/logo/raw"
+      "/api/projects/project/files/logo/raw"
     );
     expect(screen.getByRole("link", { name: "Download" })).toHaveAttribute(
       "href",
-      "http://localhost:3001/api/projects/project/files/logo/raw"
+      "/api/projects/project/files/logo/raw"
     );
   });
 });

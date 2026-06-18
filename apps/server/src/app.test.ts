@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -12,7 +13,16 @@ let tmpDir: string;
 let db: UnderleafDb;
 let config: ServerConfig;
 let app: ReturnType<typeof buildApp>;
+let authCookie: string;
 const execFileAsync = promisify(execFile);
+type TestInjectOptions =
+  | string
+  | {
+      method?: "DELETE" | "GET" | "PATCH" | "POST" | "PUT";
+      url: string;
+      headers?: Record<string, string>;
+      payload?: string | object | Buffer;
+    };
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "underleaf-test-"));
@@ -25,8 +35,9 @@ beforeEach(async () => {
     webOrigin: "http://localhost:5173",
     port: 0
   });
-  db = createDb(config.databaseUrl);
+  db = createDb(config.databaseUrl, { dataDir: config.dataDir });
   app = buildApp(db, config);
+  authCookie = await signUpTestUser();
 });
 
 afterEach(async () => {
@@ -35,9 +46,63 @@ afterEach(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
+async function inject(options: TestInjectOptions) {
+  return injectAs(authCookie, options);
+}
+
+async function injectAs(cookie: string, options: TestInjectOptions) {
+  if (typeof options === "string") {
+    return app.inject({ url: options, headers: { cookie } });
+  }
+
+  return app.inject({
+    ...options,
+    headers: {
+      ...(options.headers as Record<string, string> | undefined),
+      cookie
+    }
+  });
+}
+
+async function signUpTestUser(email = `test-${randomUUID()}@example.com`) {
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/auth/sign-up/email",
+    payload: {
+      name: "Test User",
+      email,
+      password: "password123"
+    }
+  });
+  expect(response.statusCode).toBeLessThan(300);
+  return cookieHeader(response.headers["set-cookie"]);
+}
+
+function cookieHeader(setCookie: string | string[] | number | undefined): string {
+  const cookies = Array.isArray(setCookie) ? setCookie : setCookie ? [String(setCookie)] : [];
+  return cookies.map((cookie) => cookie.split(";")[0]).join("; ");
+}
+
 describe("projects and files", () => {
+  it("requires authentication for project routes", async () => {
+    const response = await app.inject({ method: "GET", url: "/api/projects" });
+    expect(response.statusCode).toBe(401);
+  });
+
+  it("keeps projects private to their owner", async () => {
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Private" } });
+    const project = projectResponse.json<{ id: string }>();
+    const otherCookie = await signUpTestUser("other@example.com");
+
+    const listResponse = await injectAs(otherCookie, { method: "GET", url: "/api/projects" });
+    expect(listResponse.json<Array<{ id: string }>>()).toEqual([]);
+
+    const projectAccessResponse = await injectAs(otherCookie, { method: "GET", url: `/api/projects/${project.id}` });
+    expect(projectAccessResponse.statusCode).toBe(404);
+  });
+
   it("creates a project with starter files", async () => {
-    const response = await app.inject({
+    const response = await inject({
       method: "POST",
       url: "/api/projects",
       payload: { name: "Paper", template: "article" }
@@ -47,21 +112,21 @@ describe("projects and files", () => {
     const project = response.json<{ id: string; name: string }>();
     expect(project.name).toBe("Paper");
 
-    const filesResponse = await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` });
+    const filesResponse = await inject({ method: "GET", url: `/api/projects/${project.id}/files` });
     expect(filesResponse.json<Array<{ path: string }>>()).toEqual(
       expect.arrayContaining([expect.objectContaining({ path: "main.tex" })])
     );
   });
 
   it("rejects path traversal when creating files", async () => {
-    const projectResponse = await app.inject({
+    const projectResponse = await inject({
       method: "POST",
       url: "/api/projects",
       payload: { name: "Unsafe" }
     });
     const project = projectResponse.json<{ id: string }>();
 
-    const response = await app.inject({
+    const response = await inject({
       method: "POST",
       url: `/api/projects/${project.id}/files`,
       payload: { path: "../secret.tex", content: "nope" }
@@ -71,47 +136,47 @@ describe("projects and files", () => {
   });
 
   it("persists content updates", async () => {
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Draft" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Draft" } });
     const project = projectResponse.json<{ id: string }>();
-    const files = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string }>>();
+    const files = (await inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string }>>();
 
-    await app.inject({
+    await inject({
       method: "PUT",
       url: `/api/projects/${project.id}/files/${files[0].id}/content`,
       payload: { content: "\\documentclass{article}\\begin{document}Updated\\end{document}" }
     });
 
-    const fileResponse = await app.inject({ method: "GET", url: `/api/projects/${project.id}/files/${files[0].id}` });
+    const fileResponse = await inject({ method: "GET", url: `/api/projects/${project.id}/files/${files[0].id}` });
     expect(fileResponse.json<{ content: string }>().content).toContain("Updated");
   });
 
   it("sets, validates, and preserves the project root document", async () => {
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Rooted" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Rooted" } });
     const project = projectResponse.json<{ id: string; rootFilePath: string | null }>();
     expect(project.rootFilePath).toBe("main.tex");
 
-    const createRootResponse = await app.inject({
+    const createRootResponse = await inject({
       method: "POST",
       url: `/api/projects/${project.id}/files`,
       payload: { path: "paper.tex", content: "\\documentclass{article}\\begin{document}Paper\\end{document}" }
     });
     expect(createRootResponse.statusCode).toBe(201);
 
-    const invalidRootResponse = await app.inject({
+    const invalidRootResponse = await inject({
       method: "PATCH",
       url: `/api/projects/${project.id}`,
       payload: { rootFilePath: "missing.tex" }
     });
     expect(invalidRootResponse.statusCode).toBe(404);
 
-    const nonTexRootResponse = await app.inject({
+    const nonTexRootResponse = await inject({
       method: "PATCH",
       url: `/api/projects/${project.id}`,
       payload: { rootFilePath: "notes.txt" }
     });
     expect(nonTexRootResponse.statusCode).toBe(400);
 
-    const rootResponse = await app.inject({
+    const rootResponse = await inject({
       method: "PATCH",
       url: `/api/projects/${project.id}`,
       payload: { rootFilePath: "paper.tex" }
@@ -120,31 +185,31 @@ describe("projects and files", () => {
     expect(rootResponse.json<{ rootFilePath: string }>().rootFilePath).toBe("paper.tex");
 
     const paperFile = createRootResponse.json<{ id: string }>();
-    const renameResponse = await app.inject({
+    const renameResponse = await inject({
       method: "PATCH",
       url: `/api/projects/${project.id}/files/${paperFile.id}`,
       payload: { path: "chapters/paper.tex" }
     });
     expect(renameResponse.statusCode).toBe(200);
 
-    const updatedProject = (await app.inject({ method: "GET", url: `/api/projects/${project.id}` })).json<{ rootFilePath: string }>();
+    const updatedProject = (await inject({ method: "GET", url: `/api/projects/${project.id}` })).json<{ rootFilePath: string }>();
     expect(updatedProject.rootFilePath).toBe("chapters/paper.tex");
   });
 
   it("sets and validates the project compile engine", async () => {
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Engine" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Engine" } });
     const project = projectResponse.json<{ id: string; compileEngine: string; autoCompile: boolean }>();
     expect(project.compileEngine).toBe("pdflatex");
     expect(project.autoCompile).toBe(false);
 
-    const invalidResponse = await app.inject({
+    const invalidResponse = await inject({
       method: "PATCH",
       url: `/api/projects/${project.id}`,
       payload: { compileEngine: "context" }
     });
     expect(invalidResponse.statusCode).toBe(400);
 
-    const engineResponse = await app.inject({
+    const engineResponse = await inject({
       method: "PATCH",
       url: `/api/projects/${project.id}`,
       payload: { compileEngine: "xelatex" }
@@ -152,14 +217,14 @@ describe("projects and files", () => {
     expect(engineResponse.statusCode).toBe(200);
     expect(engineResponse.json<{ compileEngine: string }>().compileEngine).toBe("xelatex");
 
-    const invalidAutoCompileResponse = await app.inject({
+    const invalidAutoCompileResponse = await inject({
       method: "PATCH",
       url: `/api/projects/${project.id}`,
       payload: { autoCompile: "yes" }
     });
     expect(invalidAutoCompileResponse.statusCode).toBe(400);
 
-    const autoCompileResponse = await app.inject({
+    const autoCompileResponse = await inject({
       method: "PATCH",
       url: `/api/projects/${project.id}`,
       payload: { autoCompile: true }
@@ -195,31 +260,32 @@ describe("projects and files", () => {
       webOrigin: "http://localhost:5173",
       port: 0
     });
-    db = createDb(config.databaseUrl);
+    db = createDb(config.databaseUrl, { dataDir: config.dataDir });
     app = buildApp(db, config);
+    authCookie = await signUpTestUser();
 
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Compile Root" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Compile Root" } });
     const project = projectResponse.json<{ id: string }>();
 
-    const rootResponse = await app.inject({
+    const rootResponse = await inject({
       method: "POST",
       url: `/api/projects/${project.id}/files`,
       payload: { path: "chapters/paper.tex", content: "\\documentclass{article}\\begin{document}Paper\\end{document}" }
     });
     expect(rootResponse.statusCode).toBe(201);
 
-    await app.inject({
+    await inject({
       method: "PATCH",
       url: `/api/projects/${project.id}`,
       payload: { rootFilePath: "chapters/paper.tex" }
     });
 
-    const compileResponse = await app.inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
+    const compileResponse = await inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
     expect(compileResponse.statusCode).toBe(200);
     expect(compileResponse.json<{ status: string; stdout: string; pdfPath: string }>())
       .toEqual(expect.objectContaining({ status: "success", stdout: expect.stringContaining("compiled chapters/paper.tex") }));
 
-    const pdfResponse = await app.inject({ method: "GET", url: `/api/projects/${project.id}/pdf` });
+    const pdfResponse = await inject({ method: "GET", url: `/api/projects/${project.id}/pdf` });
     expect(pdfResponse.statusCode).toBe(200);
     expect(pdfResponse.rawPayload.toString("utf8")).toBe("PDF");
     await expect(fs.stat(path.join(tmpDir, "projects", project.id, "main.pdf"))).rejects.toThrow();
@@ -254,19 +320,20 @@ describe("projects and files", () => {
       webOrigin: "http://localhost:5173",
       port: 0
     });
-    db = createDb(config.databaseUrl);
+    db = createDb(config.databaseUrl, { dataDir: config.dataDir });
     app = buildApp(db, config);
+    authCookie = await signUpTestUser();
 
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Lua" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Lua" } });
     const project = projectResponse.json<{ id: string }>();
-    const engineResponse = await app.inject({
+    const engineResponse = await inject({
       method: "PATCH",
       url: `/api/projects/${project.id}`,
       payload: { compileEngine: "lualatex" }
     });
     expect(engineResponse.statusCode).toBe(200);
 
-    const compileResponse = await app.inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
+    const compileResponse = await inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
     expect(compileResponse.statusCode).toBe(200);
     expect(compileResponse.json<{ status: string }>().status).toBe("success");
     const args = await fs.readFile(argsPath, "utf8");
@@ -275,83 +342,83 @@ describe("projects and files", () => {
   });
 
   it("creates parent folder metadata for nested files", async () => {
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Nested" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Nested" } });
     const project = projectResponse.json<{ id: string }>();
 
-    const fileResponse = await app.inject({
+    const fileResponse = await inject({
       method: "POST",
       url: `/api/projects/${project.id}/files`,
       payload: { path: "chapters/intro.tex", content: "Intro" }
     });
 
     expect(fileResponse.statusCode).toBe(201);
-    const foldersResponse = await app.inject({ method: "GET", url: `/api/projects/${project.id}/folders` });
+    const foldersResponse = await inject({ method: "GET", url: `/api/projects/${project.id}/folders` });
     expect(foldersResponse.json<Array<{ path: string }>>()).toEqual(
       expect.arrayContaining([expect.objectContaining({ path: "chapters" })])
     );
   });
 
   it("renames and deletes folders recursively", async () => {
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Folders" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Folders" } });
     const project = projectResponse.json<{ id: string }>();
 
-    const folderResponse = await app.inject({
+    const folderResponse = await inject({
       method: "POST",
       url: `/api/projects/${project.id}/folders`,
       payload: { path: "sections" }
     });
     const folder = folderResponse.json<{ id: string }>();
 
-    await app.inject({
+    await inject({
       method: "POST",
       url: `/api/projects/${project.id}/files`,
       payload: { path: "sections/intro.tex", content: "Intro" }
     });
 
-    const renameResponse = await app.inject({
+    const renameResponse = await inject({
       method: "PATCH",
       url: `/api/projects/${project.id}/folders/${folder.id}`,
       payload: { path: "chapters" }
     });
 
     expect(renameResponse.statusCode).toBe(200);
-    const filesAfterRename = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ path: string }>>();
+    const filesAfterRename = (await inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ path: string }>>();
     expect(filesAfterRename).toEqual(expect.arrayContaining([expect.objectContaining({ path: "chapters/intro.tex" })]));
 
     const renamedFolder = renameResponse.json<{ id: string }>();
-    const deleteResponse = await app.inject({ method: "DELETE", url: `/api/projects/${project.id}/folders/${renamedFolder.id}` });
+    const deleteResponse = await inject({ method: "DELETE", url: `/api/projects/${project.id}/folders/${renamedFolder.id}` });
     expect(deleteResponse.statusCode).toBe(204);
 
-    const filesAfterDelete = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ path: string }>>();
+    const filesAfterDelete = (await inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ path: string }>>();
     expect(filesAfterDelete.some((file) => file.path.startsWith("chapters/"))).toBe(false);
   });
 
   it("rejects file and folder path collisions", async () => {
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Collisions" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Collisions" } });
     const project = projectResponse.json<{ id: string }>();
 
-    const folderResponse = await app.inject({
+    const folderResponse = await inject({
       method: "POST",
       url: `/api/projects/${project.id}/folders`,
       payload: { path: "sections" }
     });
     expect(folderResponse.statusCode).toBe(201);
 
-    const fileAtFolderPathResponse = await app.inject({
+    const fileAtFolderPathResponse = await inject({
       method: "POST",
       url: `/api/projects/${project.id}/files`,
       payload: { path: "sections", content: "" }
     });
     expect(fileAtFolderPathResponse.statusCode).toBe(409);
 
-    const fileResponse = await app.inject({
+    const fileResponse = await inject({
       method: "POST",
       url: `/api/projects/${project.id}/files`,
       payload: { path: "notes.tex", content: "" }
     });
     expect(fileResponse.statusCode).toBe(201);
 
-    const folderUnderFileResponse = await app.inject({
+    const folderUnderFileResponse = await inject({
       method: "POST",
       url: `/api/projects/${project.id}/folders`,
       payload: { path: "notes.tex/assets" }
@@ -360,7 +427,7 @@ describe("projects and files", () => {
   });
 
   it("uploads files and assigns duplicate-safe names", async () => {
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Uploads" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Uploads" } });
     const project = projectResponse.json<{ id: string }>();
     const boundary = "underleaf-test-boundary";
     const uploadBody = [
@@ -386,7 +453,7 @@ describe("projects and files", () => {
       ""
     ].join("\r\n");
 
-    const uploadResponse = await app.inject({
+    const uploadResponse = await inject({
       method: "POST",
       url: `/api/projects/${project.id}/files/upload`,
       headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
@@ -402,31 +469,31 @@ describe("projects and files", () => {
     await expect(fs.readFile(path.join(tmpDir, "projects", project.id, "figures", "logo-1.png"), "utf8")).resolves.toBe("PNGDATA2");
 
     const uploadedFile = uploadResponse.json<Array<{ id: string; path: string }>>()[0];
-    const rawResponse = await app.inject({ method: "GET", url: `/api/projects/${project.id}/files/${uploadedFile.id}/raw` });
+    const rawResponse = await inject({ method: "GET", url: `/api/projects/${project.id}/files/${uploadedFile.id}/raw` });
     expect(rawResponse.statusCode).toBe(200);
     expect(rawResponse.headers["content-type"]).toContain("image/png");
     expect(rawResponse.rawPayload.toString("utf8")).toBe("PNGDATA");
   });
 
   it("searches project text files and reports source locations", async () => {
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Searchable" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Searchable" } });
     const project = projectResponse.json<{ id: string }>();
-    const files = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
+    const files = (await inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
     const mainFile = files.find((file) => file.path === "main.tex");
     expect(mainFile).toBeDefined();
 
-    await app.inject({
+    await inject({
       method: "PUT",
       url: `/api/projects/${project.id}/files/${mainFile?.id}/content`,
       payload: { content: "\\documentclass{article}\n\\begin{document}\nA searchable theorem lives here.\n\\end{document}" }
     });
-    await app.inject({
+    await inject({
       method: "POST",
       url: `/api/projects/${project.id}/files`,
       payload: { path: "notes.txt", content: "Another searchable note" }
     });
 
-    const response = await app.inject({ method: "GET", url: `/api/projects/${project.id}/search?q=searchable` });
+    const response = await inject({ method: "GET", url: `/api/projects/${project.id}/search?q=searchable` });
 
     expect(response.statusCode).toBe(200);
     expect(response.json<Array<{ path: string; line: number; column: number; preview: string }>>()).toEqual([
@@ -436,13 +503,13 @@ describe("projects and files", () => {
   });
 
   it("builds a clickable LaTeX document outline across source files", async () => {
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Outlined" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Outlined" } });
     const project = projectResponse.json<{ id: string }>();
-    const files = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
+    const files = (await inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
     const mainFile = files.find((file) => file.path === "main.tex");
     expect(mainFile).toBeDefined();
 
-    await app.inject({
+    await inject({
       method: "PUT",
       url: `/api/projects/${project.id}/files/${mainFile?.id}/content`,
       payload: {
@@ -459,14 +526,14 @@ describe("projects and files", () => {
         ].join("\n")
       }
     });
-    const chapterResponse = await app.inject({
+    const chapterResponse = await inject({
       method: "POST",
       url: `/api/projects/${project.id}/files`,
       payload: { path: "chapters/background.tex", content: "\\section{Background}\n\\subsection{Prior Work}" }
     });
     expect(chapterResponse.statusCode).toBe(201);
 
-    const response = await app.inject({ method: "GET", url: `/api/projects/${project.id}/outline` });
+    const response = await inject({ method: "GET", url: `/api/projects/${project.id}/outline` });
 
     expect(response.statusCode).toBe(200);
     expect(response.json<Array<{ path: string; line: number; level: number; kind: string; title: string }>>()).toEqual([
@@ -480,13 +547,13 @@ describe("projects and files", () => {
   });
 
   it("counts project words while ignoring common LaTeX syntax", async () => {
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Counted" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Counted" } });
     const project = projectResponse.json<{ id: string }>();
-    const files = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
+    const files = (await inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
     const mainFile = files.find((file) => file.path === "main.tex");
     expect(mainFile).toBeDefined();
 
-    await app.inject({
+    await inject({
       method: "PUT",
       url: `/api/projects/${project.id}/files/${mainFile?.id}/content`,
       payload: {
@@ -503,13 +570,13 @@ describe("projects and files", () => {
         ].join("\n")
       }
     });
-    await app.inject({
+    await inject({
       method: "POST",
       url: `/api/projects/${project.id}/files`,
       payload: { path: "chapters/method.tex", content: "\\subsection{Method}\nSecond file adds words." }
     });
 
-    const response = await app.inject({ method: "GET", url: `/api/projects/${project.id}/word-count` });
+    const response = await inject({ method: "GET", url: `/api/projects/${project.id}/word-count` });
 
     expect(response.statusCode).toBe(200);
     expect(response.json<{ words: number; files: Array<{ path: string; words: number }> }>()).toMatchObject({
@@ -522,13 +589,13 @@ describe("projects and files", () => {
   });
 
   it("collects labels and citation keys for editor completions", async () => {
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Symbols" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Symbols" } });
     const project = projectResponse.json<{ id: string }>();
-    const files = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
+    const files = (await inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
     const mainFile = files.find((file) => file.path === "main.tex");
     expect(mainFile).toBeDefined();
 
-    await app.inject({
+    await inject({
       method: "PUT",
       url: `/api/projects/${project.id}/files/${mainFile?.id}/content`,
       payload: {
@@ -541,12 +608,12 @@ describe("projects and files", () => {
         ].join("\n")
       }
     });
-    await app.inject({
+    await inject({
       method: "POST",
       url: `/api/projects/${project.id}/files`,
       payload: { path: "chapters/results.tex", content: "\\subsection{Results}\\label{sec:results}\n\\label{sec:intro}" }
     });
-    await app.inject({
+    await inject({
       method: "POST",
       url: `/api/projects/${project.id}/files`,
       payload: {
@@ -560,7 +627,7 @@ describe("projects and files", () => {
       }
     });
 
-    const response = await app.inject({ method: "GET", url: `/api/projects/${project.id}/symbols` });
+    const response = await inject({ method: "GET", url: `/api/projects/${project.id}/symbols` });
 
     expect(response.statusCode).toBe(200);
     expect(response.json<{ labels: Array<{ key: string; path: string; line: number }>; citations: Array<{ key: string; path: string; line: number }> }>()).toEqual({
@@ -576,24 +643,24 @@ describe("projects and files", () => {
   });
 
   it("exports and imports project archives", async () => {
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Archive Source" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Archive Source" } });
     const project = projectResponse.json<{ id: string }>();
-    const files = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
+    const files = (await inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
     const mainFile = files.find((file) => file.path === "main.tex");
     expect(mainFile).toBeDefined();
 
-    await app.inject({
+    await inject({
       method: "PUT",
       url: `/api/projects/${project.id}/files/${mainFile?.id}/content`,
       payload: { content: "\\documentclass{article}\n\\begin{document}\nExported source\n\\end{document}" }
     });
-    await app.inject({
+    await inject({
       method: "POST",
       url: `/api/projects/${project.id}/files`,
       payload: { path: "chapters/intro.tex", content: "Imported chapter" }
     });
 
-    const downloadResponse = await app.inject({ method: "GET", url: `/api/projects/${project.id}/download` });
+    const downloadResponse = await inject({ method: "GET", url: `/api/projects/${project.id}/download` });
     expect(downloadResponse.statusCode).toBe(200);
     expect(downloadResponse.headers["content-type"]).toContain("application/gzip");
 
@@ -604,7 +671,7 @@ describe("projects and files", () => {
       Buffer.from(`\r\n--${boundary}--\r\n`)
     ]);
 
-    const importResponse = await app.inject({
+    const importResponse = await inject({
       method: "POST",
       url: "/api/projects/import?name=Imported%20Archive",
       headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
@@ -615,43 +682,43 @@ describe("projects and files", () => {
     const importedProject = importResponse.json<{ id: string; name: string }>();
     expect(importedProject.name).toBe("Imported Archive");
 
-    const importedFiles = (await app.inject({ method: "GET", url: `/api/projects/${importedProject.id}/files` })).json<Array<{ id: string; path: string }>>();
+    const importedFiles = (await inject({ method: "GET", url: `/api/projects/${importedProject.id}/files` })).json<Array<{ id: string; path: string }>>();
     expect(importedFiles.map((file) => file.path).sort()).toEqual(["chapters/intro.tex", "main.tex"]);
     const importedMain = importedFiles.find((file) => file.path === "main.tex");
-    const importedMainResponse = await app.inject({ method: "GET", url: `/api/projects/${importedProject.id}/files/${importedMain?.id}` });
+    const importedMainResponse = await inject({ method: "GET", url: `/api/projects/${importedProject.id}/files/${importedMain?.id}` });
     expect(importedMainResponse.json<{ content: string }>().content).toContain("Exported source");
   });
 
   it("duplicates a project with source files, folders, and root document settings", async () => {
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Original Paper" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Original Paper" } });
     const project = projectResponse.json<{ id: string }>();
-    const files = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
+    const files = (await inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
     const mainFile = files.find((file) => file.path === "main.tex");
     expect(mainFile).toBeDefined();
 
-    await app.inject({
+    await inject({
       method: "PUT",
       url: `/api/projects/${project.id}/files/${mainFile?.id}/content`,
       payload: { content: "\\documentclass{article}\n\\begin{document}\nOriginal text\n\\end{document}" }
     });
-    const chapterResponse = await app.inject({
+    const chapterResponse = await inject({
       method: "POST",
       url: `/api/projects/${project.id}/files`,
       payload: { path: "chapters/intro.tex", content: "\\section{Copied chapter}" }
     });
     expect(chapterResponse.statusCode).toBe(201);
-    await app.inject({
+    await inject({
       method: "PATCH",
       url: `/api/projects/${project.id}`,
       payload: { rootFilePath: "chapters/intro.tex" }
     });
-    await app.inject({
+    await inject({
       method: "PATCH",
       url: `/api/projects/${project.id}`,
       payload: { compileEngine: "xelatex", autoCompile: true }
     });
 
-    const duplicateResponse = await app.inject({ method: "POST", url: `/api/projects/${project.id}/duplicate` });
+    const duplicateResponse = await inject({ method: "POST", url: `/api/projects/${project.id}/duplicate` });
     expect(duplicateResponse.statusCode).toBe(201);
     const duplicateProject = duplicateResponse.json<{ id: string; name: string; rootFilePath: string | null; compileEngine: string; autoCompile: boolean }>();
     expect(duplicateProject.id).not.toBe(project.id);
@@ -660,31 +727,31 @@ describe("projects and files", () => {
     expect(duplicateProject.compileEngine).toBe("xelatex");
     expect(duplicateProject.autoCompile).toBe(true);
 
-    const duplicateFiles = (await app.inject({ method: "GET", url: `/api/projects/${duplicateProject.id}/files` })).json<Array<{ id: string; path: string }>>();
+    const duplicateFiles = (await inject({ method: "GET", url: `/api/projects/${duplicateProject.id}/files` })).json<Array<{ id: string; path: string }>>();
     expect(duplicateFiles.map((file) => file.path).sort()).toEqual(["chapters/intro.tex", "main.tex"]);
     expect(duplicateFiles.map((file) => file.id)).not.toEqual(files.map((file) => file.id));
-    const duplicateFolders = (await app.inject({ method: "GET", url: `/api/projects/${duplicateProject.id}/folders` })).json<Array<{ path: string }>>();
+    const duplicateFolders = (await inject({ method: "GET", url: `/api/projects/${duplicateProject.id}/folders` })).json<Array<{ path: string }>>();
     expect(duplicateFolders).toEqual(expect.arrayContaining([expect.objectContaining({ path: "chapters" })]));
 
     const duplicateMain = duplicateFiles.find((file) => file.path === "main.tex");
-    const duplicateMainResponse = await app.inject({ method: "GET", url: `/api/projects/${duplicateProject.id}/files/${duplicateMain?.id}` });
+    const duplicateMainResponse = await inject({ method: "GET", url: `/api/projects/${duplicateProject.id}/files/${duplicateMain?.id}` });
     expect(duplicateMainResponse.json<{ content: string }>().content).toContain("Original text");
     await expect(fs.readFile(path.join(tmpDir, "projects", duplicateProject.id, "chapters", "intro.tex"), "utf8")).resolves.toContain("Copied chapter");
   });
 
   it("initializes git repositories and commits project changes", async () => {
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Versioned" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Versioned" } });
     const project = projectResponse.json<{ id: string }>();
-    const files = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
+    const files = (await inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
     const mainFile = files.find((file) => file.path === "main.tex");
     expect(mainFile).toBeDefined();
     await execFileAsync("git", ["init"], { cwd: tmpDir });
 
-    const initialStatus = await app.inject({ method: "GET", url: `/api/projects/${project.id}/git/status` });
+    const initialStatus = await inject({ method: "GET", url: `/api/projects/${project.id}/git/status` });
     expect(initialStatus.statusCode).toBe(200);
     expect(initialStatus.json<{ initialized: boolean }>().initialized).toBe(false);
 
-    const initStatus = await app.inject({ method: "POST", url: `/api/projects/${project.id}/git/init` });
+    const initStatus = await inject({ method: "POST", url: `/api/projects/${project.id}/git/init` });
     expect(initStatus.statusCode).toBe(200);
     expect(initStatus.json<{ initialized: boolean; hasChanges: boolean; entries: Array<{ path: string }> }>()).toMatchObject({
       initialized: true,
@@ -694,7 +761,7 @@ describe("projects and files", () => {
       expect.arrayContaining([".gitignore", "main.tex"])
     );
 
-    const firstCommit = await app.inject({
+    const firstCommit = await inject({
       method: "POST",
       url: `/api/projects/${project.id}/git/commit`,
       payload: { message: "Initial project" }
@@ -703,13 +770,13 @@ describe("projects and files", () => {
     expect(firstCommit.json<{ hasChanges: boolean; lastCommit: { subject: string } }>().hasChanges).toBe(false);
     expect(firstCommit.json<{ lastCommit: { subject: string } }>().lastCommit.subject).toBe("Initial project");
 
-    await app.inject({
+    await inject({
       method: "PUT",
       url: `/api/projects/${project.id}/files/${mainFile?.id}/content`,
       payload: { content: "\\documentclass{article}\n\\begin{document}\nGit changed this.\n\\end{document}" }
     });
 
-    const dirtyStatus = await app.inject({ method: "GET", url: `/api/projects/${project.id}/git/status` });
+    const dirtyStatus = await inject({ method: "GET", url: `/api/projects/${project.id}/git/status` });
     expect(dirtyStatus.statusCode).toBe(200);
     expect(dirtyStatus.json<{ hasChanges: boolean; entries: Array<{ path: string; status: string }> }>()).toMatchObject({
       hasChanges: true,
@@ -718,17 +785,17 @@ describe("projects and files", () => {
   });
 
   it("creates and restores project snapshots", async () => {
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "History" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "History" } });
     const project = projectResponse.json<{ id: string }>();
-    const files = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string }>>();
+    const files = (await inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string }>>();
 
-    await app.inject({
+    await inject({
       method: "PUT",
       url: `/api/projects/${project.id}/files/${files[0].id}/content`,
       payload: { content: "\\documentclass{article}\\begin{document}Original\\end{document}" }
     });
 
-    const snapshotResponse = await app.inject({
+    const snapshotResponse = await inject({
       method: "POST",
       url: `/api/projects/${project.id}/snapshots`,
       payload: { label: "Before edits" }
@@ -737,44 +804,44 @@ describe("projects and files", () => {
     const snapshot = snapshotResponse.json<{ id: string; label: string; fileCount: number }>();
     expect(snapshot).toMatchObject({ label: "Before edits", fileCount: 1 });
 
-    await app.inject({
+    await inject({
       method: "PUT",
       url: `/api/projects/${project.id}/files/${files[0].id}/content`,
       payload: { content: "\\documentclass{article}\\begin{document}Changed\\end{document}" }
     });
-    await app.inject({
+    await inject({
       method: "POST",
       url: `/api/projects/${project.id}/files`,
       payload: { path: "extra.tex", content: "temporary" }
     });
 
-    const detailResponse = await app.inject({ method: "GET", url: `/api/projects/${project.id}/snapshots/${snapshot.id}` });
+    const detailResponse = await inject({ method: "GET", url: `/api/projects/${project.id}/snapshots/${snapshot.id}` });
     expect(detailResponse.statusCode).toBe(200);
     expect(detailResponse.json<{ files: Array<{ path: string }> }>().files).toEqual([expect.objectContaining({ path: "main.tex" })]);
-    const downloadResponse = await app.inject({ method: "GET", url: `/api/projects/${project.id}/snapshots/${snapshot.id}/download` });
+    const downloadResponse = await inject({ method: "GET", url: `/api/projects/${project.id}/snapshots/${snapshot.id}/download` });
     expect(downloadResponse.statusCode).toBe(200);
     expect(downloadResponse.headers["content-type"]).toContain("application/gzip");
 
-    const restoreResponse = await app.inject({ method: "POST", url: `/api/projects/${project.id}/snapshots/${snapshot.id}/restore` });
+    const restoreResponse = await inject({ method: "POST", url: `/api/projects/${project.id}/snapshots/${snapshot.id}/restore` });
     expect(restoreResponse.statusCode).toBe(200);
 
-    const filesAfterRestore = (await app.inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
+    const filesAfterRestore = (await inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
     expect(filesAfterRestore.map((file) => file.path)).toEqual(["main.tex"]);
-    const restoredFile = await app.inject({ method: "GET", url: `/api/projects/${project.id}/files/${filesAfterRestore[0].id}` });
+    const restoredFile = await inject({ method: "GET", url: `/api/projects/${project.id}/files/${filesAfterRestore[0].id}` });
     expect(restoredFile.json<{ content: string }>().content).toContain("Original");
   });
 });
 
 describe("compile", () => {
   it("records compiler errors when latexmk is unavailable", async () => {
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Compile me" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Compile me" } });
     const project = projectResponse.json<{ id: string }>();
 
-    const response = await app.inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
+    const response = await inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
     expect(response.statusCode).toBe(500);
     expect(response.json<{ status: string; stderr: string }>().status).toBe("error");
 
-    const latest = await app.inject({ method: "GET", url: `/api/projects/${project.id}/compile/latest` });
+    const latest = await inject({ method: "GET", url: `/api/projects/${project.id}/compile/latest` });
     expect(latest.json<{ status: string }>().status).toBe("error");
   });
 
@@ -789,10 +856,10 @@ describe("compile", () => {
     config.latexEngine = "auto";
     config.tectonicBin = fakeTectonic;
 
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Fallback" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Fallback" } });
     const project = projectResponse.json<{ id: string }>();
 
-    const response = await app.inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
+    const response = await inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
 
     expect(response.statusCode).toBe(200);
     expect(response.json<{ status: string; stderr: string }>().status).toBe("success");
@@ -809,10 +876,10 @@ describe("compile", () => {
     await fs.chmod(fakeLatexmk, 0o755);
     config.latexmkBin = fakeLatexmk;
 
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Broken compile" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Broken compile" } });
     const project = projectResponse.json<{ id: string }>();
 
-    const response = await app.inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
+    const response = await inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
 
     expect(response.statusCode).toBe(500);
     expect(response.json<{ diagnostics: Array<{ severity: string; filePath: string; line: number; message: string }> }>().diagnostics).toEqual([
@@ -835,10 +902,10 @@ describe("compile", () => {
     await fs.chmod(fakeLatexmk, 0o755);
     config.latexmkBin = fakeLatexmk;
 
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Warning compile" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Warning compile" } });
     const project = projectResponse.json<{ id: string }>();
 
-    const response = await app.inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
+    const response = await inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
 
     expect(response.statusCode).toBe(200);
     expect(response.json<{ diagnostics: Array<{ severity: string; filePath: string; line: number; message: string }> }>().diagnostics).toEqual([
@@ -862,14 +929,14 @@ describe("compile", () => {
     await fs.chmod(fakeLatexmk, 0o755);
     config.latexmkBin = fakeLatexmk;
 
-    const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Source lookup" } });
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Source lookup" } });
     const project = projectResponse.json<{ id: string }>();
 
-    const compileResponse = await app.inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
+    const compileResponse = await inject({ method: "POST", url: `/api/projects/${project.id}/compile` });
     expect(compileResponse.statusCode).toBe(200);
     await expect(fs.readFile(argsPath, "utf8")).resolves.toContain("-synctex=1");
 
-    const sourceResponse = await app.inject({
+    const sourceResponse = await inject({
       method: "POST",
       url: `/api/projects/${project.id}/pdf/source`,
       payload: { page: 1, x: 100, y: 100, text: "Fresh Underleaf Article" }
