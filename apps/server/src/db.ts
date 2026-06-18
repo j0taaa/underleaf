@@ -8,6 +8,7 @@ export type ProjectRow = {
   name: string;
   rootFilePath: string | null;
   compileEngine: CompileEngine;
+  autoCompile: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -86,6 +87,7 @@ export function createDb(databaseUrl: string) {
       name TEXT NOT NULL,
       root_file_path TEXT,
       compile_engine TEXT NOT NULL DEFAULT 'pdflatex',
+      auto_compile INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -133,6 +135,7 @@ export function createDb(databaseUrl: string) {
   ensureColumn(db, "compile_jobs", "diagnostics", "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(db, "projects", "root_file_path", "TEXT");
   ensureColumn(db, "projects", "compile_engine", "TEXT NOT NULL DEFAULT 'pdflatex'");
+  ensureColumn(db, "projects", "auto_compile", "INTEGER NOT NULL DEFAULT 0");
 
   db.prepare(
     "INSERT OR IGNORE INTO users (id, email, display_name, created_at) VALUES (?, ?, ?, ?)"
@@ -141,18 +144,21 @@ export function createDb(databaseUrl: string) {
   return {
     close: () => db.close(),
     listProjects(): ProjectRow[] {
-      return db.prepare("SELECT id, owner_id as ownerId, name, root_file_path as rootFilePath, compile_engine as compileEngine, created_at as createdAt, updated_at as updatedAt FROM projects ORDER BY updated_at DESC").all() as ProjectRow[];
+      const rows = db.prepare("SELECT id, owner_id as ownerId, name, root_file_path as rootFilePath, compile_engine as compileEngine, auto_compile as autoCompile, created_at as createdAt, updated_at as updatedAt FROM projects ORDER BY updated_at DESC").all() as ProjectSelectRow[];
+      return rows.map(hydrateProject);
     },
     getProject(id: string): ProjectRow | undefined {
-      return db.prepare("SELECT id, owner_id as ownerId, name, root_file_path as rootFilePath, compile_engine as compileEngine, created_at as createdAt, updated_at as updatedAt FROM projects WHERE id = ?").get(id) as ProjectRow | undefined;
+      const row = db.prepare("SELECT id, owner_id as ownerId, name, root_file_path as rootFilePath, compile_engine as compileEngine, auto_compile as autoCompile, created_at as createdAt, updated_at as updatedAt FROM projects WHERE id = ?").get(id) as ProjectSelectRow | undefined;
+      return row ? hydrateProject(row) : undefined;
     },
     createProject(project: ProjectRow): void {
-      db.prepare("INSERT INTO projects (id, owner_id, name, root_file_path, compile_engine, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+      db.prepare("INSERT INTO projects (id, owner_id, name, root_file_path, compile_engine, auto_compile, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
         project.id,
         project.ownerId,
         project.name,
         project.rootFilePath,
         project.compileEngine,
+        project.autoCompile ? 1 : 0,
         project.createdAt,
         project.updatedAt
       );
@@ -167,6 +173,10 @@ export function createDb(databaseUrl: string) {
     },
     updateProjectCompileEngine(projectId: string, compileEngine: CompileEngine, updatedAt: string): boolean {
       const result = db.prepare("UPDATE projects SET compile_engine = ?, updated_at = ? WHERE id = ?").run(compileEngine, updatedAt, projectId);
+      return result.changes > 0;
+    },
+    updateProjectAutoCompile(projectId: string, autoCompile: boolean, updatedAt: string): boolean {
+      const result = db.prepare("UPDATE projects SET auto_compile = ?, updated_at = ? WHERE id = ?").run(autoCompile ? 1 : 0, updatedAt, projectId);
       return result.changes > 0;
     },
     deleteProject(id: string): boolean {
@@ -345,6 +355,12 @@ export function createDb(databaseUrl: string) {
       transaction();
     }
   };
+}
+
+type ProjectSelectRow = Omit<ProjectRow, "autoCompile"> & { autoCompile: number };
+
+function hydrateProject(row: ProjectSelectRow): ProjectRow {
+  return { ...row, autoCompile: row.autoCompile === 1 };
 }
 
 function ensureColumn(db: Database.Database, table: string, column: string, definition: string): void {

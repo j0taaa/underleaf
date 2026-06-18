@@ -13,7 +13,7 @@ import { resolveTemplate, templates } from "./templates.js";
 
 type CreateProjectBody = { name?: string; template?: string };
 type ImportProjectQuery = { name?: string };
-type UpdateProjectBody = { name?: string; rootFilePath?: string | null; compileEngine?: string };
+type UpdateProjectBody = { name?: string; rootFilePath?: string | null; compileEngine?: string; autoCompile?: boolean };
 type CreateFileBody = { path?: string; content?: string };
 type UpdateFileBody = { content?: string };
 type RenamePathBody = { path?: string };
@@ -87,6 +87,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
       name: request.body.name?.trim() || "Untitled Project",
       rootFilePath: templateRootFile(Object.keys(template.files)),
       compileEngine: "pdflatex" as const,
+      autoCompile: false,
       createdAt: now,
       updatedAt: now
     };
@@ -159,6 +160,11 @@ export function buildApp(db: UnderleafDb, config: ServerConfig): FastifyInstance
       const compileEngine = validateCompileEngine(request.body.compileEngine);
       if (!compileEngine) return reply.code(400).send({ message: "Compile engine must be pdflatex, xelatex, or lualatex" });
       db.updateProjectCompileEngine(request.params.projectId, compileEngine, new Date().toISOString());
+    }
+
+    if (Object.prototype.hasOwnProperty.call(request.body, "autoCompile")) {
+      if (typeof request.body.autoCompile !== "boolean") return reply.code(400).send({ message: "Auto compile must be true or false" });
+      db.updateProjectAutoCompile(request.params.projectId, request.body.autoCompile, new Date().toISOString());
     }
 
     return db.getProject(request.params.projectId);
@@ -921,6 +927,7 @@ async function duplicateProject(db: UnderleafDb, config: ServerConfig, sourcePro
     name: `Copy of ${sourceProject.name}`,
     rootFilePath: sourceProject.rootFilePath,
     compileEngine: sourceProject.compileEngine,
+    autoCompile: sourceProject.autoCompile,
     createdAt: now,
     updatedAt: now
   };
@@ -981,6 +988,7 @@ async function importProjectArchive(db: UnderleafDb, config: ServerConfig, archi
       name: requestedName?.trim() || archiveProjectName(filename),
       rootFilePath: detectRootFilePath(files.map((file) => ({ path: file.path }) as FileRow)),
       compileEngine: "pdflatex",
+      autoCompile: false,
       createdAt: now,
       updatedAt: now
     };

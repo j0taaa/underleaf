@@ -23,6 +23,7 @@ export function EditorHeader({
   onRenameSubmit,
   onRootFileChange,
   onCompileEngineChange,
+  onAutoCompileChange,
   onHistoryToggle,
   onSourceControlToggle,
   onWordCountToggle,
@@ -44,6 +45,7 @@ export function EditorHeader({
   onRenameSubmit: () => void;
   onRootFileChange: (rootFilePath: string | null) => void;
   onCompileEngineChange: (compileEngine: CompileEngine) => void;
+  onAutoCompileChange: (autoCompile: boolean) => void;
   onHistoryToggle: () => void;
   onSourceControlToggle: () => void;
   onWordCountToggle: () => void;
@@ -112,10 +114,12 @@ export function EditorHeader({
         <ProjectSettingsMenu
           rootFilePath={project.rootFilePath}
           compileEngine={project.compileEngine}
+          autoCompile={project.autoCompile}
           files={files}
           updating={updatingRootFile}
           onRootFileChange={onRootFileChange}
           onCompileEngineChange={onCompileEngineChange}
+          onAutoCompileChange={onAutoCompileChange}
         />
         <div className="hidden items-center rounded-md border border-border p-0.5 md:flex">
           <Button variant={layout === "split" ? "secondary" : "ghost"} size="icon" title="Split view" onClick={() => onLayoutChange("split")}>

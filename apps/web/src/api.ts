@@ -4,6 +4,7 @@ export type Project = {
   name: string;
   rootFilePath: string | null;
   compileEngine: CompileEngine;
+  autoCompile: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -184,6 +185,12 @@ export const api = {
     return request<Project>(`/api/projects/${projectId}`, {
       method: "PATCH",
       body: JSON.stringify({ compileEngine })
+    });
+  },
+  updateProjectAutoCompile(projectId: string, autoCompile: boolean) {
+    return request<Project>(`/api/projects/${projectId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ autoCompile })
     });
   },
   deleteProject(projectId: string) {

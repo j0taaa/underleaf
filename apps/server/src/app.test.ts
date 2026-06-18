@@ -133,8 +133,9 @@ describe("projects and files", () => {
 
   it("sets and validates the project compile engine", async () => {
     const projectResponse = await app.inject({ method: "POST", url: "/api/projects", payload: { name: "Engine" } });
-    const project = projectResponse.json<{ id: string; compileEngine: string }>();
+    const project = projectResponse.json<{ id: string; compileEngine: string; autoCompile: boolean }>();
     expect(project.compileEngine).toBe("pdflatex");
+    expect(project.autoCompile).toBe(false);
 
     const invalidResponse = await app.inject({
       method: "PATCH",
@@ -150,6 +151,21 @@ describe("projects and files", () => {
     });
     expect(engineResponse.statusCode).toBe(200);
     expect(engineResponse.json<{ compileEngine: string }>().compileEngine).toBe("xelatex");
+
+    const invalidAutoCompileResponse = await app.inject({
+      method: "PATCH",
+      url: `/api/projects/${project.id}`,
+      payload: { autoCompile: "yes" }
+    });
+    expect(invalidAutoCompileResponse.statusCode).toBe(400);
+
+    const autoCompileResponse = await app.inject({
+      method: "PATCH",
+      url: `/api/projects/${project.id}`,
+      payload: { autoCompile: true }
+    });
+    expect(autoCompileResponse.statusCode).toBe(200);
+    expect(autoCompileResponse.json<{ autoCompile: boolean }>().autoCompile).toBe(true);
   });
 
   it("compiles the selected root document instead of assuming main.tex", async () => {
@@ -632,16 +648,17 @@ describe("projects and files", () => {
     await app.inject({
       method: "PATCH",
       url: `/api/projects/${project.id}`,
-      payload: { compileEngine: "xelatex" }
+      payload: { compileEngine: "xelatex", autoCompile: true }
     });
 
     const duplicateResponse = await app.inject({ method: "POST", url: `/api/projects/${project.id}/duplicate` });
     expect(duplicateResponse.statusCode).toBe(201);
-    const duplicateProject = duplicateResponse.json<{ id: string; name: string; rootFilePath: string | null; compileEngine: string }>();
+    const duplicateProject = duplicateResponse.json<{ id: string; name: string; rootFilePath: string | null; compileEngine: string; autoCompile: boolean }>();
     expect(duplicateProject.id).not.toBe(project.id);
     expect(duplicateProject.name).toBe("Copy of Original Paper");
     expect(duplicateProject.rootFilePath).toBe("chapters/intro.tex");
     expect(duplicateProject.compileEngine).toBe("xelatex");
+    expect(duplicateProject.autoCompile).toBe(true);
 
     const duplicateFiles = (await app.inject({ method: "GET", url: `/api/projects/${duplicateProject.id}/files` })).json<Array<{ id: string; path: string }>>();
     expect(duplicateFiles.map((file) => file.path).sort()).toEqual(["chapters/intro.tex", "main.tex"]);

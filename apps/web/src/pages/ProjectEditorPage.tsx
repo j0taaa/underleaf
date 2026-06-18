@@ -188,6 +188,22 @@ export function ProjectEditorPage() {
     void selectFirstFile();
   }, [activeFile, autoOpenedProjectId, files, project?.rootFilePath, projectId, queryClient]);
 
+  const compileMutation = useMutation({
+    mutationFn: () => api.compile(projectId),
+    onSuccess: async (job) => {
+      setCompileOverride(job);
+      queryClient.setQueryData(["latest-compile", projectId], job);
+      if (job.status === "success") setPdfNonce(Date.now());
+    },
+    onError: async () => {
+      const latest = await queryClient.fetchQuery({
+        queryKey: ["latest-compile", projectId],
+        queryFn: () => api.latestCompile(projectId)
+      });
+      setCompileOverride(latest);
+    }
+  });
+
   const saveFileMutation = useMutation({
     mutationFn: ({ fileId, nextContent }: { fileId: string; nextContent: string }) => api.saveFile(projectId, fileId, nextContent),
     onSuccess: async (saved) => {
@@ -195,6 +211,9 @@ export function ProjectEditorPage() {
       setActiveFile(saved);
       setSaveState("saved");
       await Promise.all([invalidateGitStatus(), invalidateOutline(), invalidateWordCount(), invalidateSymbols()]);
+      if (project?.autoCompile && saved.path.toLowerCase().endsWith(".tex") && !compileMutation.isPending) {
+        compileMutation.mutate();
+      }
     },
     onError: () => setSaveState("error")
   });
@@ -358,22 +377,6 @@ export function ProjectEditorPage() {
     }
   });
 
-  const compileMutation = useMutation({
-    mutationFn: () => api.compile(projectId),
-    onSuccess: async (job) => {
-      setCompileOverride(job);
-      queryClient.setQueryData(["latest-compile", projectId], job);
-      if (job.status === "success") setPdfNonce(Date.now());
-    },
-    onError: async () => {
-      const latest = await queryClient.fetchQuery({
-        queryKey: ["latest-compile", projectId],
-        queryFn: () => api.latestCompile(projectId)
-      });
-      setCompileOverride(latest);
-    }
-  });
-
   const renameProjectMutation = useMutation({
     mutationFn: (name: string) => api.updateProject(projectId, name),
     onSuccess: async (nextProject) => {
@@ -404,6 +407,14 @@ export function ProjectEditorPage() {
         queryClient.invalidateQueries({ queryKey: ["latest-compile", projectId] }),
         invalidateGitStatus()
       ]);
+    }
+  });
+
+  const updateAutoCompileMutation = useMutation({
+    mutationFn: (autoCompile: boolean) => api.updateProjectAutoCompile(projectId, autoCompile),
+    onSuccess: async (nextProject) => {
+      queryClient.setQueryData(["project", projectId], nextProject);
+      await invalidateGitStatus();
     }
   });
 
@@ -547,6 +558,10 @@ export function ProjectEditorPage() {
     await updateCompileEngineMutation.mutateAsync(compileEngine);
   };
 
+  const updateAutoCompile = async (autoCompile: boolean) => {
+    await updateAutoCompileMutation.mutateAsync(autoCompile);
+  };
+
   const createSnapshot = async () => {
     await createSnapshotMutation.mutateAsync(snapshotLabel);
   };
@@ -677,13 +692,14 @@ export function ProjectEditorPage() {
         layout={layout}
         compileJob={compileJob}
         compiling={compileMutation.isPending}
-        updatingRootFile={updateRootFileMutation.isPending || updateCompileEngineMutation.isPending}
+        updatingRootFile={updateRootFileMutation.isPending || updateCompileEngineMutation.isPending || updateAutoCompileMutation.isPending}
         statusText={statusText}
         onProjectNameChange={setProjectName}
         onRenameStart={() => setRenaming(true)}
         onRenameSubmit={() => void renameProject()}
         onRootFileChange={(rootFilePath) => void updateRootFile(rootFilePath)}
         onCompileEngineChange={(compileEngine) => void updateCompileEngine(compileEngine)}
+        onAutoCompileChange={(autoCompile) => void updateAutoCompile(autoCompile)}
         onHistoryToggle={() => {
           setSourceControlOpen(false);
           setWordCountOpen(false);

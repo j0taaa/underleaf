@@ -7,17 +7,21 @@ import { Select } from "../ui/select";
 export function ProjectSettingsMenu({
   rootFilePath,
   compileEngine,
+  autoCompile,
   files,
   updating,
   onRootFileChange,
-  onCompileEngineChange
+  onCompileEngineChange,
+  onAutoCompileChange
 }: {
   rootFilePath: string | null;
   compileEngine: CompileEngine;
+  autoCompile: boolean;
   files: ProjectFile[];
   updating: boolean;
   onRootFileChange: (rootFilePath: string | null) => void;
   onCompileEngineChange: (compileEngine: CompileEngine) => void;
+  onAutoCompileChange: (autoCompile: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
   const texFiles = useMemo(
@@ -65,6 +69,19 @@ export function ProjectSettingsMenu({
                 <option value="xelatex">XeLaTeX</option>
                 <option value="lualatex">LuaLaTeX</option>
               </Select>
+            </label>
+            <label className="flex items-center justify-between gap-3 rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-foreground">
+              <span className="min-w-0">
+                <span className="block">Auto compile</span>
+                <span className="mt-0.5 block text-[11px] font-normal text-muted-foreground">Recompile after autosave</span>
+              </span>
+              <input
+                type="checkbox"
+                className="h-4 w-4 accent-primary"
+                checked={autoCompile}
+                disabled={updating}
+                onChange={(event) => onAutoCompileChange(event.target.checked)}
+              />
             </label>
           </div>
         </div>
