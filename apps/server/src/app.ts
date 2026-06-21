@@ -22,6 +22,7 @@ type UpdateFileBody = { content?: string };
 type RenamePathBody = { path?: string };
 type GitCommitBody = { message?: string };
 type ProjectSearchQuery = { q?: string };
+type ProjectReplaceBody = { query?: string; replacement?: string };
 type PdfSourceBody = { page?: number; x?: number; y?: number; text?: string };
 type CreateSnapshotBody = { label?: string };
 type ProjectSearchResult = {
@@ -30,6 +31,11 @@ type ProjectSearchResult = {
   line: number;
   column: number;
   preview: string;
+};
+type ProjectReplaceResult = {
+  filesChanged: number;
+  replacements: number;
+  files: Array<{ fileId: string; path: string; replacements: number }>;
 };
 type ProjectOutlineItem = {
   fileId: string;
@@ -117,6 +123,7 @@ export function buildApp(db: UnderleafDb, config: ServerConfig, auth: UnderleafA
     const session = await auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
     if (!session) return reply.code(401).send({ message: "Unauthorized" });
     (request as AuthenticatedRequest).userId = session.user.id;
+    db.claimLegacyProjects(session.user.id, new Date().toISOString());
   });
 
   app.get("/api/projects", async (request) => db.listProjects(requireUserId(request)));
@@ -254,6 +261,19 @@ export function buildApp(db: UnderleafDb, config: ServerConfig, auth: UnderleafA
     if (query.length > 120) return reply.code(400).send({ message: "Search query is too long" });
 
     return searchProjectFiles(db, config, request.params.projectId, query);
+  });
+
+  app.post<{ Params: { projectId: string }; Body: ProjectReplaceBody }>("/api/projects/:projectId/replace", async (request, reply) => {
+    if (!getOwnedProject(db, request, reply)) return reply.code(404).send({ message: "Project not found" });
+
+    const body = request.body ?? {};
+    const query = body.query?.trim() ?? "";
+    const replacement = body.replacement ?? "";
+    if (query.length < 2) return reply.code(400).send({ message: "Replace query must be at least 2 characters" });
+    if (query.length > 120) return reply.code(400).send({ message: "Replace query is too long" });
+    if (replacement.length > 500) return reply.code(400).send({ message: "Replacement is too long" });
+
+    return replaceProjectFiles(db, config, request.params.projectId, query, replacement);
   });
 
   app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/outline", async (request, reply) => {
@@ -1743,6 +1763,55 @@ async function searchProjectFiles(db: UnderleafDb, config: ServerConfig, project
   }
 
   return results;
+}
+
+async function replaceProjectFiles(db: UnderleafDb, config: ServerConfig, projectId: string, query: string, replacement: string): Promise<ProjectReplaceResult> {
+  const root = path.resolve(projectRoot(config.dataDir, projectId));
+  const files: ProjectReplaceResult["files"] = [];
+  let replacements = 0;
+
+  for (const file of db.listFiles(projectId)) {
+    if (!isSearchableFile(file.path)) continue;
+
+    const absoluteFile = path.resolve(root, normalizeProjectPath(file.path));
+    if (!absoluteFile.startsWith(root)) continue;
+
+    const stat = await fs.stat(absoluteFile).catch(() => null);
+    if (!stat?.isFile() || stat.size > 1024 * 1024) continue;
+
+    const content = await fs.readFile(absoluteFile, "utf8").catch(() => "");
+    if (content.includes("\u0000")) continue;
+
+    const replaced = replaceAllCaseInsensitive(content, query, replacement);
+    if (replaced.count === 0) continue;
+
+    await fs.writeFile(absoluteFile, replaced.content, "utf8");
+    db.updateFileTimestamp(projectId, file.id, new Date().toISOString());
+    files.push({ fileId: file.id, path: file.path, replacements: replaced.count });
+    replacements += replaced.count;
+  }
+
+  return { filesChanged: files.length, replacements, files };
+}
+
+function replaceAllCaseInsensitive(content: string, query: string, replacement: string): { content: string; count: number } {
+  const lowerContent = content.toLowerCase();
+  const lowerQuery = query.toLowerCase();
+  const chunks: string[] = [];
+  let count = 0;
+  let cursor = 0;
+
+  for (;;) {
+    const index = lowerContent.indexOf(lowerQuery, cursor);
+    if (index === -1) break;
+    chunks.push(content.slice(cursor, index), replacement);
+    cursor = index + query.length;
+    count += 1;
+  }
+
+  if (count === 0) return { content, count };
+  chunks.push(content.slice(cursor));
+  return { content: chunks.join(""), count };
 }
 
 function isSearchableFile(filePath: string): boolean {

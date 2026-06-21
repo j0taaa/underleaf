@@ -1,4 +1,4 @@
-import { FileSearch, Search, X } from "lucide-react";
+import { FileSearch, Replace, Search, X } from "lucide-react";
 import type { ProjectSearchResult } from "../../api";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -7,17 +7,28 @@ export function ProjectSearchPanel({
   query,
   results,
   searching,
+  replacement,
+  replacing,
+  replaceSummary,
   onQueryChange,
+  onReplacementChange,
+  onReplaceAll,
   onOpenResult
 }: {
   query: string;
   results: ProjectSearchResult[];
   searching: boolean;
+  replacement: string;
+  replacing: boolean;
+  replaceSummary: string | null;
   onQueryChange: (query: string) => void;
+  onReplacementChange: (replacement: string) => void;
+  onReplaceAll: () => void;
   onOpenResult: (result: ProjectSearchResult) => void;
 }) {
   const trimmedQuery = query.trim();
   const groupedResults = groupSearchResults(results);
+  const canReplace = trimmedQuery.length >= 2 && results.length > 0 && !replacing;
 
   return (
     <section className="border-b border-border bg-[#f6f8fa]">
@@ -36,6 +47,29 @@ export function ProjectSearchPanel({
           </Button>
         )}
       </div>
+      {trimmedQuery.length > 0 && (
+        <div className="flex items-center gap-2 border-b border-border px-2 py-1.5">
+          <Replace className="h-4 w-4 text-muted-foreground" />
+          <Input
+            aria-label="Replace in project"
+            className="h-7 min-w-0 flex-1 rounded-sm bg-white px-2 text-xs"
+            placeholder="Replace"
+            value={replacement}
+            onChange={(event) => onReplacementChange(event.target.value)}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 px-2 text-xs"
+            disabled={!canReplace}
+            title="Replace all matches"
+            onClick={onReplaceAll}
+          >
+            {replacing ? "Replacing" : "All"}
+          </Button>
+        </div>
+      )}
+      {replaceSummary && <div className="border-b border-border px-3 py-1.5 text-xs text-muted-foreground">{replaceSummary}</div>}
       {trimmedQuery.length > 0 && (
         <div className="max-h-56 overflow-auto py-1 text-xs">
           {trimmedQuery.length < 2 && <div className="px-3 py-2 text-muted-foreground">Type at least 2 characters</div>}

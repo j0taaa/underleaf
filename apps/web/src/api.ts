@@ -39,6 +39,12 @@ export type ProjectSearchResult = {
   preview: string;
 };
 
+export type ProjectReplaceResult = {
+  filesChanged: number;
+  replacements: number;
+  files: Array<{ fileId: string; path: string; replacements: number }>;
+};
+
 export type ProjectOutlineItem = {
   fileId: string;
   path: string;
@@ -205,6 +211,12 @@ export const api = {
   },
   searchProject(projectId: string, query: string) {
     return request<ProjectSearchResult[]>(`/api/projects/${projectId}/search?q=${encodeURIComponent(query)}`);
+  },
+  replaceProject(projectId: string, input: { query: string; replacement: string }) {
+    return request<ProjectReplaceResult>(`/api/projects/${projectId}/replace`, {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
   },
   outlineProject(projectId: string) {
     return request<ProjectOutlineItem[]>(`/api/projects/${projectId}/outline`);

@@ -189,10 +189,19 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}) {
   ensureColumn(db, "projects", "compile_engine", "TEXT NOT NULL DEFAULT 'pdflatex'");
   ensureColumn(db, "projects", "auto_compile", "INTEGER NOT NULL DEFAULT 0");
 
-  resetLegacyProjects(db, options.dataDir);
-
   return {
     close: () => db.close(),
+    claimLegacyProjects(ownerId: string, updatedAt: string): void {
+      const transaction = db.transaction(() => {
+        const marker = db.prepare("SELECT value FROM app_meta WHERE key = ?").get("auth_migration_v1") as { value: string } | undefined;
+        if (marker) return;
+
+        db.prepare("UPDATE projects SET owner_id = ?, updated_at = ? WHERE owner_id = ?").run(ownerId, updatedAt, "local-user");
+        db.prepare("INSERT INTO app_meta (key, value) VALUES (?, ?)").run("auth_migration_v1", updatedAt);
+      });
+
+      transaction();
+    },
     listProjects(ownerId: string): ProjectRow[] {
       const rows = db.prepare("SELECT id, owner_id as ownerId, name, root_file_path as rootFilePath, compile_engine as compileEngine, auto_compile as autoCompile, created_at as createdAt, updated_at as updatedAt FROM projects WHERE owner_id = ? ORDER BY updated_at DESC").all(ownerId) as ProjectSelectRow[];
       return rows.map(hydrateProject);
@@ -419,27 +428,6 @@ function ensureColumn(db: Database.Database, table: string, column: string, defi
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   if (!columns.some((item) => item.name === column)) {
     db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
-  }
-}
-
-function resetLegacyProjects(db: Database.Database, dataDir: string | undefined): void {
-  const marker = db.prepare("SELECT value FROM app_meta WHERE key = ?").get("auth_migration_v1") as { value: string } | undefined;
-  if (marker) return;
-
-  const transaction = db.transaction(() => {
-    db.prepare("DELETE FROM project_snapshots").run();
-    db.prepare("DELETE FROM compile_jobs").run();
-    db.prepare("DELETE FROM files").run();
-    db.prepare("DELETE FROM folders").run();
-    db.prepare("DELETE FROM projects").run();
-    db.prepare("DELETE FROM users WHERE id = ?").run("local-user");
-    db.prepare("INSERT INTO app_meta (key, value) VALUES (?, ?)").run("auth_migration_v1", new Date().toISOString());
-  });
-  transaction();
-
-  if (dataDir) {
-    fs.rmSync(path.join(dataDir, "projects"), { recursive: true, force: true });
-    fs.rmSync(path.join(dataDir, "snapshots"), { recursive: true, force: true });
   }
 }
 

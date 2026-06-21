@@ -4,6 +4,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "./app.js";
 import { getConfig, type ServerConfig } from "./config.js";
@@ -99,6 +100,53 @@ describe("projects and files", () => {
 
     const projectAccessResponse = await injectAs(otherCookie, { method: "GET", url: `/api/projects/${project.id}` });
     expect(projectAccessResponse.statusCode).toBe(404);
+  });
+
+  it("claims legacy local projects without deleting their files", async () => {
+    const now = new Date().toISOString();
+    const legacyProjectId = "legacy-project";
+    const legacyFileId = "legacy-main";
+    const legacyRoot = path.join(tmpDir, "projects", legacyProjectId);
+    await fs.mkdir(legacyRoot, { recursive: true });
+    await fs.writeFile(path.join(legacyRoot, "main.tex"), "Legacy content", "utf8");
+
+    const rawDb = new Database(config.databaseUrl);
+    rawDb.prepare("INSERT INTO users (id, email, display_name, email_verified, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)").run(
+      "local-user",
+      "local@underleaf.invalid",
+      "Local User",
+      0,
+      now,
+      now
+    );
+    rawDb.prepare("INSERT INTO projects (id, owner_id, name, root_file_path, compile_engine, auto_compile, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+      legacyProjectId,
+      "local-user",
+      "Legacy Project",
+      "main.tex",
+      "pdflatex",
+      0,
+      now,
+      now
+    );
+    rawDb.prepare("INSERT INTO files (id, project_id, path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run(
+      legacyFileId,
+      legacyProjectId,
+      "main.tex",
+      now,
+      now
+    );
+    rawDb.close();
+
+    const projectsResponse = await inject({ method: "GET", url: "/api/projects" });
+    expect(projectsResponse.json<Array<{ id: string; name: string }>>()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: legacyProjectId, name: "Legacy Project" })])
+    );
+
+    const fileResponse = await inject({ method: "GET", url: `/api/projects/${legacyProjectId}/files/${legacyFileId}` });
+    expect(fileResponse.statusCode).toBe(200);
+    expect(fileResponse.json<{ content: string }>().content).toBe("Legacy content");
+    await expect(fs.readFile(path.join(legacyRoot, "main.tex"), "utf8")).resolves.toBe("Legacy content");
   });
 
   it("creates a project with starter files", async () => {
@@ -500,6 +548,47 @@ describe("projects and files", () => {
       expect.objectContaining({ path: "main.tex", line: 3, column: 3, preview: "A searchable theorem lives here." }),
       expect.objectContaining({ path: "notes.txt", line: 1, column: 9, preview: "Another searchable note" })
     ]);
+  });
+
+  it("replaces project text matches across searchable files", async () => {
+    const projectResponse = await inject({ method: "POST", url: "/api/projects", payload: { name: "Replaceable" } });
+    const project = projectResponse.json<{ id: string }>();
+    const files = (await inject({ method: "GET", url: `/api/projects/${project.id}/files` })).json<Array<{ id: string; path: string }>>();
+    const mainFile = files.find((file) => file.path === "main.tex");
+    expect(mainFile).toBeDefined();
+
+    await inject({
+      method: "PUT",
+      url: `/api/projects/${project.id}/files/${mainFile?.id}/content`,
+      payload: { content: "\\documentclass{article}\n\\begin{document}\nAlpha alpha beta.\n\\end{document}" }
+    });
+    const notesResponse = await inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/files`,
+      payload: { path: "notes.txt", content: "Another ALPHA note" }
+    });
+
+    const response = await inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/replace`,
+      payload: { query: "alpha", replacement: "gamma" }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<{ filesChanged: number; replacements: number; files: Array<{ path: string; replacements: number }> }>()).toEqual({
+      filesChanged: 2,
+      replacements: 3,
+      files: [
+        { fileId: mainFile?.id, path: "main.tex", replacements: 2 },
+        { fileId: notesResponse.json<{ id: string }>().id, path: "notes.txt", replacements: 1 }
+      ]
+    });
+
+    const mainContent = await inject({ method: "GET", url: `/api/projects/${project.id}/files/${mainFile?.id}` });
+    expect(mainContent.json<{ content: string }>().content).toContain("gamma gamma beta.");
+
+    const notesContent = await inject({ method: "GET", url: `/api/projects/${project.id}/files/${notesResponse.json<{ id: string }>().id}` });
+    expect(notesContent.json<{ content: string }>().content).toBe("Another gamma note");
   });
 
   it("builds a clickable LaTeX document outline across source files", async () => {

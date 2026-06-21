@@ -50,6 +50,8 @@ export function ProjectEditorPage() {
   const [snapshotLabel, setSnapshotLabel] = useState("");
   const [commitMessage, setCommitMessage] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchReplacement, setSearchReplacement] = useState("");
+  const [replaceSummary, setReplaceSummary] = useState<string | null>(null);
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
 
   const projectQuery = useQuery({
@@ -146,6 +148,8 @@ export function ProjectEditorPage() {
     setAutoOpenedProjectId(null);
     setOpenFileIds([]);
     setSearchQuery("");
+    setSearchReplacement("");
+    setReplaceSummary(null);
     setDebouncedSearchQuery("");
     setCommitMessage("");
   }, [projectId]);
@@ -377,6 +381,37 @@ export function ProjectEditorPage() {
     }
   });
 
+  const replaceProjectMutation = useMutation({
+    mutationFn: ({ query, replacement }: { query: string; replacement: string }) => api.replaceProject(projectId, { query, replacement }),
+    onSuccess: async (result) => {
+      setReplaceSummary(`${result.replacements} ${result.replacements === 1 ? "match" : "matches"} replaced in ${result.filesChanged} ${result.filesChanged === 1 ? "file" : "files"}.`);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["project-files", projectId] }),
+        queryClient.invalidateQueries({ queryKey: ["project-search", projectId] }),
+        invalidateProject(),
+        invalidateGitStatus(),
+        invalidateOutline(),
+        invalidateWordCount(),
+        invalidateSymbols()
+      ]);
+
+      for (const file of result.files) {
+        queryClient.setQueryData(["project-file", projectId, file.fileId], undefined);
+      }
+
+      if (activeFile && result.files.some((file) => file.fileId === activeFile.id)) {
+        const refreshed = await api.getFile(projectId, activeFile.id);
+        queryClient.setQueryData(["project-file", projectId, activeFile.id], refreshed);
+        setActiveFile(refreshed);
+        setContent(refreshed.content);
+        setSaveState("idle");
+      }
+    },
+    onError: (error) => {
+      setReplaceSummary(error instanceof Error ? error.message : "Replace failed");
+    }
+  });
+
   const renameProjectMutation = useMutation({
     mutationFn: (name: string) => api.updateProject(projectId, name),
     onSuccess: async (nextProject) => {
@@ -580,6 +615,12 @@ export function ProjectEditorPage() {
     await commitGitMutation.mutateAsync(commitMessage);
   };
 
+  const replaceAll = async () => {
+    if (searchQuery.trim().length < 2 || searchResults.length === 0) return;
+    await saveCurrentFile();
+    await replaceProjectMutation.mutateAsync({ query: searchQuery.trim(), replacement: searchReplacement });
+  };
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const modifier = event.metaKey || event.ctrlKey;
@@ -732,11 +773,22 @@ export function ProjectEditorPage() {
           onDeleteFolder={(folder) => void deleteFolder(folder)}
           onUploadItems={(dataTransfer, parentPath) => void uploadDroppedItems(dataTransfer, parentPath)}
           searchQuery={searchQuery}
+          searchReplacement={searchReplacement}
           searchResults={searchResults}
           searching={projectSearchQuery.isFetching}
+          replacing={replaceProjectMutation.isPending}
+          replaceSummary={replaceSummary}
           outlineItems={outlineItems}
           outlineLoading={projectOutlineQuery.isFetching}
-          onSearchQueryChange={setSearchQuery}
+          onSearchQueryChange={(query) => {
+            setSearchQuery(query);
+            setReplaceSummary(null);
+          }}
+          onSearchReplacementChange={(replacement) => {
+            setSearchReplacement(replacement);
+            setReplaceSummary(null);
+          }}
+          onReplaceAll={() => void replaceAll()}
           onOpenSearchResult={(result) => void showSearchResult(result)}
           onOpenOutlineItem={(item) => void showOutlineItem(item)}
         />

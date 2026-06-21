@@ -41,11 +41,16 @@ export function FileSidebar({
   onDeleteFolder,
   onUploadItems,
   searchQuery,
+  searchReplacement,
   searchResults,
   searching,
+  replacing,
+  replaceSummary,
   outlineItems,
   outlineLoading,
   onSearchQueryChange,
+  onSearchReplacementChange,
+  onReplaceAll,
   onOpenSearchResult,
   onOpenOutlineItem
 }: {
@@ -61,11 +66,16 @@ export function FileSidebar({
   onDeleteFolder: (folder: ProjectFolder) => void;
   onUploadItems: (dataTransfer: DataTransfer, parentPath: string) => void;
   searchQuery: string;
+  searchReplacement: string;
   searchResults: ProjectSearchResult[];
   searching: boolean;
+  replacing: boolean;
+  replaceSummary: string | null;
   outlineItems: ProjectOutlineItem[];
   outlineLoading: boolean;
   onSearchQueryChange: (query: string) => void;
+  onSearchReplacementChange: (replacement: string) => void;
+  onReplaceAll: () => void;
   onOpenSearchResult: (result: ProjectSearchResult) => void;
   onOpenOutlineItem: (item: ProjectOutlineItem) => void;
 }) {
@@ -164,7 +174,12 @@ export function FileSidebar({
         query={searchQuery}
         results={searchResults}
         searching={searching}
+        replacement={searchReplacement}
+        replacing={replacing}
+        replaceSummary={replaceSummary}
         onQueryChange={onSearchQueryChange}
+        onReplacementChange={onSearchReplacementChange}
+        onReplaceAll={onReplaceAll}
         onOpenResult={onOpenSearchResult}
       />
 
