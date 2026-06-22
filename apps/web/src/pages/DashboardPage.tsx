@@ -59,10 +59,16 @@ export function DashboardPage() {
           });
         }}
       />
-      <section className="mx-auto grid max-w-6xl gap-6 px-4 py-6 lg:grid-cols-[360px_minmax(0,1fr)]">
-        <div className="grid content-start gap-4">
+      <section className="mx-auto grid max-w-6xl gap-4 px-4 py-6">
+        <div className="flex items-center justify-between border-b border-border pb-3">
+          <div>
+            <h2 className="text-sm font-semibold">Projects</h2>
+            <p className="text-xs text-muted-foreground">Create a new project or import an archive.</p>
+          </div>
+          <div className="flex items-center gap-2">
           <CreateProjectForm onCreate={(input) => createProjectMutation.mutateAsync(input).then(() => undefined)} />
           <ImportProjectForm importing={importProjectMutation.isPending} onImport={(input) => importProjectMutation.mutateAsync(input).then(() => undefined)} />
+          </div>
         </div>
         <ProjectList
           projects={projectsQuery.data ?? []}

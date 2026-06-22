@@ -49,6 +49,7 @@ describe("App", () => {
     );
 
     expect(await screen.findByText("Underleaf")).toBeInTheDocument();
-    expect(await screen.findByText("Create project")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Create project")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Import project")).toBeInTheDocument();
   });
 });
